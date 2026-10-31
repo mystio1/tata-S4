@@ -1,0 +1,11 @@
+# The laboratory agent runs on the privileged Ubuntu host, separately from the
+# public API. Kept deliberately small: this process has network-administration
+# capability, so every dependency is a liability.
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+
+# Development and test tooling
+pytest==8.3.4
+httpx==0.28.1
+ruff==0.8.6

@@ -18,11 +18,15 @@ project:
 from __future__ import annotations
 
 import logging
+import os
 import re
+import shutil
 import signal
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from .commands import executable, in_namespace
@@ -47,6 +51,10 @@ logger = logging.getLogger("qosense.lab.measurement")
 PROBE_INTERVAL_SECONDS = 0.2
 MAX_GENERATORS = 12
 
+# Generators write their interval reports here so throughput can be read while
+# a run is in progress rather than only once it finishes.
+LOG_DIRECTORY = Path(tempfile.gettempdir()) / "qosense-lab"
+
 
 @dataclass
 class Generator:
@@ -58,6 +66,7 @@ class Generator:
     traffic_class: str
     direction: str
     process: subprocess.Popen[bytes]
+    log_path: Path
 
     @property
     def running(self) -> bool:
@@ -115,6 +124,12 @@ def _spawn(namespace: str, argv: list[str]) -> subprocess.Popen[bytes]:
     )
 
 
+def reset_log_directory() -> None:
+    """Clear previous generator logs so a new run starts from nothing."""
+    shutil.rmtree(LOG_DIRECTORY, ignore_errors=True)
+    LOG_DIRECTORY.mkdir(parents=True, exist_ok=True)
+
+
 # ---------------------------------------------------------------------------
 # Generators
 # ---------------------------------------------------------------------------
@@ -159,9 +174,17 @@ def start_flow(
 
     ensure_server(checked_port)
 
+    LOG_DIRECTORY.mkdir(parents=True, exist_ok=True)
+    log_path = LOG_DIRECTORY / f"{name}-{checked_port}.log"
+    log_path.unlink(missing_ok=True)
+
+    # --forceflush makes iperf3 write each interval report as it happens,
+    # which is what lets throughput be read during the run instead of only
+    # from a summary once it ends.
     argv: list[str] = [
         "iperf3", "--client", IP_WAN, "--port", checked_port,
-        "--time", f"{duration:.0f}", "--interval", "1",
+        "--time", f"{duration:.0f}", "--interval", "1", "--forceflush",
+        "--logfile", str(log_path),
     ]
     if direction == "DOWNLOAD":
         argv.append("--reverse")
@@ -181,6 +204,7 @@ def start_flow(
         traffic_class=traffic_class,
         direction=direction,
         process=_spawn(NS_HOME, argv),
+        log_path=log_path,
     )
     POOL.flows.append(generator)
     logger.info("started generator %s on port %d (%s)", name, checked_port, direction)
@@ -301,3 +325,138 @@ def queue_stats() -> dict[str, Any]:
         "gateway_download": _parse_qdisc(gateway_download),
         "bottleneck_download": _parse_qdisc(bottleneck),
     }
+
+
+# ---------------------------------------------------------------------------
+# Live throughput
+# ---------------------------------------------------------------------------
+
+# An iperf3 interval line, for example:
+#   [  5]   3.00-4.00   sec  8.11 MBytes  68.1 Mbits/sec
+# The datagram form adds jitter and loss:
+#   [  5]   3.00-4.00   sec  1.19 MBytes  10.0 Mbits/sec  0.040 ms  0/862 (0%)
+_INTERVAL_LINE = re.compile(
+    r"\]\s+(?P<start>[\d.]+)-(?P<end>[\d.]+)\s+sec\s+[\d.]+\s+\w+Bytes\s+"
+    r"(?P<rate>[\d.]+)\s+(?P<unit>[KMG]?)bits/sec"
+    r"(?:\s+(?P<jitter>[\d.]+)\s+ms\s+(?P<lost>\d+)/(?P<total>\d+))?"
+)
+_RATE_UNIT_SCALE = {"": 1e-6, "K": 1e-3, "M": 1.0, "G": 1e3}
+
+
+def _last_interval(log_path: Path) -> dict[str, Any] | None:
+    """Parse the most recent completed interval report from a generator log."""
+    try:
+        text = log_path.read_text(errors="replace")
+    except OSError:
+        return None
+
+    last: dict[str, Any] | None = None
+    for line in text.splitlines():
+        if "sender" in line or "receiver" in line or "SUM" in line:
+            continue
+        match = _INTERVAL_LINE.search(line)
+        if not match:
+            continue
+        scale = _RATE_UNIT_SCALE.get(match.group("unit"), 1.0)
+        entry: dict[str, Any] = {
+            "window_start_seconds": float(match.group("start")),
+            "window_end_seconds": float(match.group("end")),
+            "throughput_mbps": round(float(match.group("rate")) * scale, 4),
+        }
+        if match.group("jitter") is not None:
+            lost = int(match.group("lost"))
+            total = int(match.group("total"))
+            entry["jitter_ms"] = float(match.group("jitter"))
+            entry["packet_loss_percent"] = round(lost / total * 100.0, 4) if total else None
+            entry["packets_per_second"] = (
+                round(total / max(0.001, entry["window_end_seconds"] - entry["window_start_seconds"]), 2)
+            )
+        last = entry
+    return last
+
+
+def flow_rates() -> dict[str, dict[str, Any]]:
+    """Measured throughput per generated flow, from its own interval reports."""
+    rates: dict[str, dict[str, Any]] = {}
+    for generator in POOL.flows:
+        interval = _last_interval(generator.log_path)
+        rates[generator.name] = {
+            "port": generator.port,
+            "protocol": generator.protocol,
+            "direction": generator.direction,
+            "traffic_class": generator.traffic_class,
+            "running": generator.running,
+            # None rather than zero: a flow with no interval report yet has
+            # not been measured, which is not the same as measuring nothing.
+            "throughput_mbps": interval["throughput_mbps"] if interval else None,
+            "jitter_ms": (interval or {}).get("jitter_ms"),
+            "packet_loss_percent": (interval or {}).get("packet_loss_percent"),
+            "packets_per_second": (interval or {}).get("packets_per_second"),
+        }
+    return rates
+
+
+_CLASS_LINE = re.compile(r"class htb 1:(?P<minor>[0-9a-f]+)")
+_CLASS_SENT = re.compile(r"Sent (?P<bytes>\d+) bytes (?P<packets>\d+) pkt")
+_CLASS_DROPPED = re.compile(r"dropped (?P<dropped>\d+)")
+
+_LAST_CLASS_COUNTERS: dict[str, tuple[float, dict[str, int]]] = {}
+
+
+def class_throughput(interface: str) -> dict[str, dict[str, Any]]:
+    """Per-class throughput, differenced from the kernel's byte counters.
+
+    These counters are the authoritative view of what the shaper actually
+    served, independent of whatever a generator reports about itself.
+    """
+    from .safety import CLASS_MINORS  # local import keeps the constant nearby
+
+    minor_to_class = {minor: name for name, minor in CLASS_MINORS.items()}
+    output = in_namespace(
+        NS_GATEWAY, ["tc", "-s", "class", "show", "dev", interface], check=False
+    ).stdout
+
+    totals: dict[str, int] = {}
+    drops: dict[str, int] = {}
+    backlog: dict[str, int] = {}
+    current_class: str | None = None
+    for line in output.splitlines():
+        header = _CLASS_LINE.search(line)
+        if header:
+            current_class = minor_to_class.get(int(header.group("minor"), 16))
+            continue
+        if current_class is None:
+            continue
+        sent = _CLASS_SENT.search(line)
+        if sent:
+            totals[current_class] = int(sent.group("bytes"))
+            dropped = _CLASS_DROPPED.search(line)
+            drops[current_class] = int(dropped.group("dropped")) if dropped else 0
+        queued = _BACKLOG.search(line)
+        if queued:
+            backlog[current_class] = int(queued.group("packets"))
+
+    now = time.monotonic()
+    previous = _LAST_CLASS_COUNTERS.get(interface)
+    _LAST_CLASS_COUNTERS[interface] = (now, dict(totals))
+
+    result: dict[str, dict[str, Any]] = {}
+    for traffic_class, total_bytes in totals.items():
+        throughput: float | None = None
+        if previous is not None:
+            elapsed = now - previous[0]
+            before = previous[1].get(traffic_class)
+            if before is not None and elapsed > 0.05 and total_bytes >= before:
+                throughput = round((total_bytes - before) * 8 / elapsed / 1e6, 4)
+        result[traffic_class] = {
+            "throughput_mbps": throughput,
+            "total_bytes": total_bytes,
+            "dropped_packets": drops.get(traffic_class, 0),
+            "queue_packets": backlog.get(traffic_class, 0),
+        }
+    return result
+
+
+def reset_counters() -> None:
+    """Forget the previous counter sample so the next read starts clean."""
+    _LAST_CLASS_COUNTERS.clear()
