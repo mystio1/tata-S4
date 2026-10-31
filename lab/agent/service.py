@@ -220,8 +220,9 @@ def create_app() -> FastAPI:
     # -- measurement -------------------------------------------------------
 
     @app.get("/metrics", tags=["measurement"])
-    def get_metrics(_: Authenticated, probe_count: int = 6) -> dict[str, Any]:
-        return RUNNER.metrics(probe_count=max(1, min(30, probe_count)))
+    def get_metrics(_: Authenticated, window_seconds: float = 2.0) -> dict[str, Any]:
+        """Return immediately with the most recent measurement window."""
+        return RUNNER.metrics(window_seconds=max(0.5, min(30.0, window_seconds)))
 
     # -- policy ------------------------------------------------------------
 

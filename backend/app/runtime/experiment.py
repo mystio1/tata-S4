@@ -27,13 +27,15 @@ import asyncio
 import contextlib
 import itertools
 import statistics
+import time
 from datetime import UTC, datetime
+from typing import Any
 
 from app.config import Settings
 from app.control.capacity import CapacityEstimator
 from app.control.classifier import TrafficClassifier
 from app.control.congestion import CongestionPredictor
-from app.control.enforcement import SimulatedEnforcer
+from app.control.enforcement import LabAgentEnforcer, SimulatedEnforcer
 from app.control.intent import IntentManager
 from app.control.observer import FlowObserver
 from app.control.policy_engine import PolicyEngine, PolicyInputs
@@ -70,6 +72,8 @@ from app.domain.metrics import (
 )
 from app.domain.policy import PolicyHistoryEntry, PolicyProposal
 from app.domain.topology import Topology
+from app.lab.client import LabAgentClient, LabAgentError
+from app.lab.source import LabDataSource
 from app.models.registry import MODEL_1, MODEL_2, ModelRegistry
 from app.runtime.event_bus import EventBus
 from app.simulation.engine import SimulationEngine, jain_fairness_index
@@ -84,6 +88,12 @@ POLICY_EVALUATION_INTERVAL_SECONDS = 1.0
 # How often an unavailable-model congestion prediction record is republished,
 # so the user interface keeps an accurate, current picture of Model 2's state.
 CONGESTION_PREDICTION_INTERVAL_SECONDS = 2.0
+# How long a laboratory agent health answer is reused before asking again.
+LAB_HEALTH_CACHE_SECONDS = 5.0
+
+
+class LiveModeUnavailable(RuntimeError):
+    """A LIVE run was requested without a usable laboratory agent."""
 
 
 def _mode_availability(mode: ExperimentMode, registry: ModelRegistry) -> ModeAvailability:
@@ -196,13 +206,37 @@ class ExperimentRuntime:
         if self.mode_availability.degraded:
             self.notes.append(self.mode_availability.detail)
 
-        self.engine = SimulationEngine(
-            scenario=scenario,
-            parameters=parameters,
-            seed=request.seed,
-            tick_seconds=settings.tick_seconds,
-            duration_seconds=duration,
-        )
+        # The control loop below consumes one TickResult per tick and does not
+        # know where it came from. In SIMULATION that is the deterministic
+        # engine; in LIVE it is the laboratory agent's measurements shaped the
+        # same way. Keeping one control path means the behaviour demonstrated
+        # in simulation is literally the behaviour running in the laboratory.
+        self.live: bool = request.data_mode is DataMode.LIVE
+        if self.live:
+            # A live run samples a real link, so it ticks far slower than the
+            # simulator: a probe window needs time to contain probes.
+            self.tick_seconds = max(settings.tick_seconds, settings.live_tick_seconds)
+            self.config = self.config.model_copy(
+                update={"tick_seconds": self.tick_seconds}
+            )
+            self.engine: Any = LabDataSource(
+                client=LabAgentClient(settings.lab_agent_url, settings.lab_agent_token),
+                scenario_id=scenario.scenario_id,
+                experiment_id=experiment_id,
+                parameters=parameters,
+                duration_seconds=duration,
+                tick_seconds=self.tick_seconds,
+                queue_limit_packets=scenario.queue_limit_packets,
+            )
+        else:
+            self.tick_seconds = settings.tick_seconds
+            self.engine = SimulationEngine(
+                scenario=scenario,
+                parameters=parameters,
+                seed=request.seed,
+                tick_seconds=settings.tick_seconds,
+                duration_seconds=duration,
+            )
         self.topology: Topology = build_topology(scenario, request.data_mode)
         self.observer = FlowObserver()
         self.classifier = TrafficClassifier(registry)
@@ -213,7 +247,9 @@ class ExperimentRuntime:
         }
         self.policy_engine = PolicyEngine(settings)
         self.safety_guard = SafetyGuard(settings)
-        self.enforcer = SimulatedEnforcer(settings, self.engine)
+        self.enforcer: Any = (
+            LabAgentEnforcer(settings) if self.live else SimulatedEnforcer(settings, self.engine)
+        )
         self.verifier = Verifier(settings)
         self.watchdog = Watchdog()
         self.intents = IntentManager(settings)
@@ -230,6 +266,10 @@ class ExperimentRuntime:
         self.current_proposal: PolicyProposal | None = None
         self.current_profile: PolicyProfile | None = None
         self.last_policy_change_elapsed = 0.0
+        # The total rate the installed policy imposes, or None when
+        # nothing is installed. The capacity estimator needs it to tell
+        # our own limit apart from the link's.
+        self.shaped_total_mbps: float | None = None
         self.safety_rejections = 0
         self.rollbacks = 0
         self.policy_changes = 0
@@ -237,6 +277,7 @@ class ExperimentRuntime:
 
         self._started_at: datetime | None = None
         self._stopped_at: datetime | None = None
+        self._lab_started = False
         self._last_policy_eval = -POLICY_EVALUATION_INTERVAL_SECONDS
         self._last_prediction_publish = -CONGESTION_PREDICTION_INTERVAL_SECONDS
         self._rolling_window = MeasurementWindow()
@@ -299,6 +340,22 @@ class ExperimentRuntime:
     def start(self) -> None:
         if self.status is ExperimentStatus.RUNNING:
             return
+        if self.live and not self._lab_started:
+            # Reset the laboratory and start its generators before the first
+            # tick, so the controller never samples a half-built testbed.
+            try:
+                self.engine.start()
+                self._lab_started = True
+                self.notes.extend(self.engine.notes)
+            except LabAgentError as exc:
+                self.status = ExperimentStatus.FAILED
+                self._publish(
+                    EventType.SYSTEM_ERROR,
+                    {"error": str(exc)},
+                    f"The laboratory agent could not start the scenario: {exc}",
+                    EventSeverity.CRITICAL,
+                )
+                return
         self._started_at = self._started_at or datetime.now(UTC)
         self.status = ExperimentStatus.RUNNING
         self.watchdog.heartbeat()
@@ -333,6 +390,10 @@ class ExperimentRuntime:
             return
         # Return the data plane to its unshaped baseline before finishing.
         self.engine.set_shaping(None, None)
+        self.shaped_total_mbps = None
+        if self.live and self._lab_started:
+            self.engine.stop()
+            self._lab_started = False
         self.status = ExperimentStatus.COMPLETED if completed else ExperimentStatus.STOPPED
         self._stopped_at = datetime.now(UTC)
         self._publish(
@@ -398,6 +459,9 @@ class ExperimentRuntime:
                 queue_occupancy_percent=sample.queue_occupancy_percent,
                 added_delay_ms=result.added_delay_ms,
                 elapsed_seconds=result.elapsed_seconds,
+                # Without this the estimator reads our own shaping as the
+                # link's limit and ratchets itself downward run after run.
+                shaped_total_mbps=self.shaped_total_mbps,
                 now=now,
             )
 
@@ -794,21 +858,37 @@ class ExperimentRuntime:
             },
         )
 
+        if self.live:
+            # The data path recognises a flow by its generator port; the class
+            # it is put in is the one the controller decided from behaviour.
+            self.enforcer.set_flow_selectors(
+                self.engine.flow_selectors(
+                    {flow_id: state.traffic_class for flow_id, state in self.flow_states.items()}
+                )
+            )
         enforcement = self.enforcer.apply_policy(proposal)
         entry = PolicyHistoryEntry(proposal=proposal, enforcement=enforcement)
         self.policy_history.append(entry)
 
-        if enforcement.status is EnforcementStatus.SIMULATED:
+        if enforcement.status in (EnforcementStatus.SIMULATED, EnforcementStatus.APPLIED):
             self.current_profile = proposal.profile
             self.last_policy_change_elapsed = result.elapsed_seconds
             self.policy_changes += 1
+            self.shaped_total_mbps = proposal.based_on_capacity_mbps or sum(
+                a.ceiling_mbps for a in proposal.class_allocations
+            )
             self._publish(
                 EventType.POLICY_APPLIED,
                 enforcement.model_dump(mode="json"),
                 (
-                    f"{proposal.profile.value} installed on the simulator in "
-                    f"{enforcement.apply_duration_ms:.2f} ms. This is a simulated "
-                    f"application, not live Linux traffic control."
+                    f"{proposal.profile.value} installed in "
+                    f"{enforcement.apply_duration_ms:.2f} ms "
+                    + (
+                        "and confirmed by reading real Linux traffic control state back."
+                        if enforcement.status is EnforcementStatus.APPLIED
+                        else "on the simulator. This is a simulated application, not live "
+                        "Linux traffic control."
+                    )
                 ),
                 EventSeverity.SUCCESS,
             )
@@ -869,10 +949,14 @@ class ExperimentRuntime:
         )
         restore = self.enforcer.restore_snapshot(snapshot_id)
         self.rollbacks += 1
-        restored_ok = restore.status is EnforcementStatus.SIMULATED
+        restored_ok = restore.status in (
+            EnforcementStatus.SIMULATED,
+            EnforcementStatus.APPLIED,
+        )
         if restored_ok:
             if not self.enforcer.installed_allocations:
                 self.current_profile = None
+                self.shaped_total_mbps = None
             self.last_policy_change_elapsed = result.elapsed_seconds
         self._publish(
             EventType.ROLLBACK_COMPLETED,
@@ -970,14 +1054,34 @@ class ExperimentRuntime:
             if runtime.spec.true_class is TrafficClass.BULK
         )
 
-        limitations = [
-            "All values come from the deterministic simulator and are labelled SIMULATION. "
-            "They are not measurements of a real network.",
-            "No Linux traffic control was applied. Enforcement is simulated and reported as "
-            "SIMULATED, never APPLIED.",
+        # The limitations must describe the run that actually happened. A
+        # live run that reported simulator caveats would understate what it
+        # achieved exactly as badly as a simulated run overstating it.
+        if self.live:
+            limitations = [
+                "Values are measurements taken in an isolated Linux laboratory on emulated "
+                "network namespaces. They are not measurements of a real Internet service "
+                "provider connection.",
+                "Policy was applied with real Linux traffic control and each application was "
+                "confirmed by reading the kernel's own queue discipline state back.",
+                "The emulated bottleneck is configured by the laboratory and is never read by "
+                "the capacity estimator, which has to discover the rate from delivered "
+                "throughput and delay.",
+                "Shaping below the measured rate can ratchet the capacity estimate downward, "
+                "because the estimator then only ever observes the shaped rate. Compare the "
+                "estimate against the configured laboratory rate when interpreting a run.",
+            ]
+        else:
+            limitations = [
+                "All values come from the deterministic simulator and are labelled SIMULATION. "
+                "They are not measurements of a real network.",
+                "No Linux traffic control was applied. Enforcement is simulated and reported as "
+                "SIMULATED, never APPLIED.",
+            ]
+        limitations.append(
             f"Model 1 is {self.registry.status(MODEL_1).state.value}; "
-            f"Model 2 is {self.registry.status(MODEL_2).state.value}.",
-        ]
+            f"Model 2 is {self.registry.status(MODEL_2).state.value}."
+        )
         if self.mode_availability.degraded:
             limitations.append(self.mode_availability.detail)
         if self.config.mode is ExperimentMode.TRADITIONAL_ADAPTIVE:
@@ -1014,12 +1118,63 @@ class ExperimentManager:
         self.registry = registry
         self.bus = bus
         self._runs: dict[str, ExperimentRuntime] = {}
+        self._next_tick: dict[str, float] = {}
+        self._lab_health: Any = None
+        self._lab_health_at = 0.0
         self._loop_task: asyncio.Task[None] | None = None
         self._stopping = False
 
     # -- registry -------------------------------------------------------
 
+    def lab_health(self) -> Any:
+        """Ask the laboratory agent whether it is there, cached briefly.
+
+        A health check per request would add a network round trip to every
+        page load, and the answer does not change that fast.
+        """
+        from app.lab.client import LabAgentHealth
+
+        if not self.settings.lab_agent_url:
+            return LabAgentHealth(
+                reachable=False,
+                detail=(
+                    "No Ubuntu laboratory agent is configured, so LIVE data mode and real "
+                    "Linux traffic control are unavailable."
+                ),
+            )
+        now = time.monotonic()
+        if self._lab_health is not None and now - self._lab_health_at < LAB_HEALTH_CACHE_SECONDS:
+            return self._lab_health
+        client = LabAgentClient(self.settings.lab_agent_url, self.settings.lab_agent_token)
+        self._lab_health = client.health()
+        self._lab_health_at = now
+        return self._lab_health
+
+    def live_available(self) -> tuple[bool, str]:
+        """Whether a LIVE run can be created, and why not when it cannot."""
+        if not self.settings.enable_live_enforcement:
+            return False, (
+                "Live enforcement is disabled by configuration. Set "
+                "QOSENSE_ENABLE_LIVE_ENFORCEMENT=true once a laboratory agent is running."
+            )
+        if not self.settings.lab_agent_url or not self.settings.lab_agent_token:
+            return False, (
+                "The laboratory agent's address and token must both be configured before "
+                "LIVE mode can be used."
+            )
+        health = self.lab_health()
+        if not health.reachable:
+            return False, health.detail
+        return True, "A laboratory agent is connected."
+
     def create(self, request: ExperimentCreateRequest) -> ExperimentRuntime:
+        if request.data_mode is DataMode.LIVE:
+            # LIVE is only offered when an agent is genuinely there. The
+            # interface must never present a live badge it cannot back up.
+            available, reason = self.live_available()
+            if not available:
+                raise LiveModeUnavailable(reason)
+
         active = [
             r
             for r in self._runs.values()
@@ -1067,12 +1222,23 @@ class ExperimentManager:
     # -- loop -----------------------------------------------------------
 
     async def _run_loop(self) -> None:
-        interval = self.settings.tick_seconds
+        # The shortest tick any run needs. A live run ticks slower than a
+        # simulated one, so each run is advanced only when its own interval
+        # has elapsed.
         while not self._stopping:
             started = asyncio.get_running_loop().time()
+            interval = min(
+                [self.settings.tick_seconds]
+                + [r.tick_seconds for r in self._runs.values()]
+            )
+            now = asyncio.get_running_loop().time()
             for runtime in list(self._runs.values()):
                 if runtime.status is not ExperimentStatus.RUNNING:
                     continue
+                due = self._next_tick.get(runtime.experiment_id, 0.0)
+                if now < due:
+                    continue
+                self._next_tick[runtime.experiment_id] = now + runtime.tick_seconds
                 try:
                     runtime.tick()
                 except Exception as exc:  # pragma: no cover - defensive
@@ -1112,7 +1278,10 @@ class ExperimentManager:
         self._stopping = True
         if self._loop_task is not None:
             self._loop_task.cancel()
-            with contextlib.suppress(Exception):  # pragma: no cover - teardown
+            # CancelledError derives from BaseException, not Exception, so it
+            # has to be named explicitly or it escapes and turns an ordinary
+            # shutdown into a failed one.
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await self._loop_task
             self._loop_task = None
         for runtime in self._runs.values():

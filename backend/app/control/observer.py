@@ -118,6 +118,9 @@ class FlowObserver:
             rate = sample.served_bps
             acc.rate_samples_bps.append(rate)
             acc.packets_per_second_samples.append(sample.packets_per_second)
+            # Only record a packet size that was actually measured. A flow
+            # with no measurement yet contributes nothing rather than a
+            # guess, because packet size is what the classifier leads with.
             packet_bytes = observed_packet_bytes.get(sample.flow_id, 0.0)
             if packet_bytes > 0:
                 acc.mean_packet_bytes_samples.append(packet_bytes)

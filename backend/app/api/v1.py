@@ -49,7 +49,11 @@ from app.domain.metrics import (
 from app.domain.policy import IntentLease, PolicyHistoryEntry, PolicyProposal
 from app.domain.topology import Topology
 from app.models.registry import ModelStatus
-from app.runtime.experiment import ExperimentManager, ExperimentRuntime
+from app.runtime.experiment import (
+    ExperimentManager,
+    ExperimentRuntime,
+    LiveModeUnavailable,
+)
 from app.simulation.scenarios import SCENARIOS
 from app.state import AppState, get_state
 
@@ -164,20 +168,28 @@ def system_status(state: StateDep, settings: SettingsDep) -> SystemStatus:
 
     runtime = state.manager.latest()
     lab_configured = bool(settings.lab_agent_url and settings.lab_agent_token)
+    live_available, live_detail = state.manager.live_available()
+    health = state.manager.lab_health()
+    supported = [DataMode.SIMULATION]
+    if live_available:
+        supported.append(DataMode.LIVE)
     return SystemStatus(
         build_version=settings.build_version,
-        data_mode=DataMode.SIMULATION,
-        supported_data_modes=[DataMode.SIMULATION],
+        data_mode=(
+            runtime.data_mode if runtime is not None else DataMode.SIMULATION
+        ),
+        supported_data_modes=supported,
         controller_running=runtime is not None and runtime.status.value == "RUNNING",
         models=state.registry.all_statuses(),
         lab_agent=LabAgentStatus(
             configured=lab_configured,
-            reachable=False,
+            reachable=health.reachable,
             live_enforcement_enabled=settings.enable_live_enforcement,
-            detail=(
-                "No Ubuntu laboratory agent is connected. LIVE data mode and real Linux "
-                "traffic control are implemented in Phase 3 and are unavailable in this "
-                "build, so nothing here can be reported as applied to a real link."
+            detail=live_detail if not live_available else (
+                f"Laboratory agent {health.agent_version or 'connected'}; "
+                f"testbed built: {health.laboratory_built}. Real Linux traffic control "
+                f"is available and every applied policy is verified by reading the "
+                f"kernel's own state back."
             ),
         ),
         modes=[_mode_availability(mode, state.registry) for mode in ExperimentMode],
@@ -299,6 +311,10 @@ def create_experiment(state: StateDep, request: ExperimentCreateRequest) -> Expe
     except KeyError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+        ) from None
+    except LiveModeUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
         ) from None
     except RuntimeError as exc:
         raise HTTPException(

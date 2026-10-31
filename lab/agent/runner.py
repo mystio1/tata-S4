@@ -95,6 +95,7 @@ class LabRunner:
             m.reset_counters()
             m.reset_log_directory()
             profile = topology.reset(link)
+            m.start_probe()
             self._run = None
             check = topology.connectivity_check()
             return {
@@ -139,6 +140,22 @@ class LabRunner:
             m.reset_log_directory()
             topology.reset(link)
             enf.clear_shaping()
+            # Counting filters go in before any traffic, so the observer sees
+            # a flow's real packet sizes from its very first window.
+            m.install_flow_counters(
+                [
+                    {
+                        "name": flow.name,
+                        "port": flow.port,
+                        "protocol": flow.protocol,
+                        "direction": flow.direction,
+                    }
+                    for flow in scenario.flows
+                ]
+            )
+            # The probe runs continuously for the whole experiment, so its
+            # sampling rate is independent of how often the controller asks.
+            m.start_probe()
 
             self._run = RunState(
                 experiment_id=checked_id,
@@ -248,16 +265,21 @@ class LabRunner:
 
     # -- measurement ---------------------------------------------------
 
-    def metrics(self, probe_count: int = 6) -> dict[str, Any]:
+    def metrics(self, window_seconds: float = 2.0) -> dict[str, Any]:
         """One measurement sample. Everything here came from the kernel.
 
-        The emulated bottleneck's configured rate is deliberately absent: the
-        controller's capacity estimator has to discover it from delivered
-        throughput and delay, which is the whole point of having it.
+        This returns immediately: the round-trip figures are read out of the
+        continuous probe's recent window rather than by starting a new ping,
+        so a controller sampling once a second is not held up for a second.
+
+        The emulated bottleneck's configured rate is deliberately absent. The
+        capacity estimator has to discover it from delivered throughput and
+        delay, which is the whole point of having one.
         """
         run = self._run
-        probe = m.probe_rtt(count=probe_count)
+        probe = m.recent_probe(window_seconds=window_seconds)
         queues = m.queue_stats()
+        counters = m.flow_counters()
 
         return {
             "experiment_id": run.experiment_id if run else None,
@@ -266,7 +288,8 @@ class LabRunner:
             "measured_at": datetime.now(UTC).isoformat(),
             "data_mode": "LIVE",
             "probe": probe,
-            "flows": m.flow_rates(),
+            "probe_running": m.probe_running(),
+            "flows": _merge_flow_views(m.flow_rates(), counters),
             "classes": {
                 "download": m.class_throughput(IF_IFB),
                 "upload": m.class_throughput(IF_GW_WAN),
@@ -276,3 +299,38 @@ class LabRunner:
 
 
 RUNNER = LabRunner()
+
+
+def _merge_flow_views(
+    reported: dict[str, Any], counted: dict[str, Any]
+) -> dict[str, Any]:
+    """Combine what a generator says about itself with what the kernel saw.
+
+    The kernel's counters win for throughput and packet size, because they
+    are what actually crossed the interface. The generator still contributes
+    the datagram statistics it alone can report, such as one-way loss.
+    """
+    merged: dict[str, Any] = {}
+    for name, entry in reported.items():
+        counter = counted.get(name, {})
+        merged[name] = {
+            **entry,
+            "throughput_mbps": (
+                counter.get("throughput_mbps")
+                if counter.get("throughput_mbps") is not None
+                else entry.get("throughput_mbps")
+            ),
+            "packets_per_second": (
+                counter.get("packets_per_second")
+                if counter.get("packets_per_second") is not None
+                else entry.get("packets_per_second")
+            ),
+            "mean_packet_bytes": counter.get("mean_packet_bytes"),
+            "total_bytes": counter.get("total_bytes"),
+            "measured_by": "kernel counters" if counter else "generator report",
+        }
+    # A flow the generator has not started yet can still have counters.
+    for name, counter in counted.items():
+        if name not in merged:
+            merged[name] = {**counter, "running": False, "measured_by": "kernel counters"}
+    return merged

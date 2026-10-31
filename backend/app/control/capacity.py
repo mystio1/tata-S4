@@ -36,6 +36,16 @@ from app.domain.metrics import CapacityEstimate
 # at least this deep, which means the link had more offered load than it could
 # serve.
 SATURATION_QUEUE_OCCUPANCY_PERCENT = 2.0
+# A sample taken while our own shaper was the binding constraint says nothing
+# about the link. Treating it as evidence creates a ratchet: shape below the
+# link, measure the shaped rate, lower the estimate, shape lower again. The
+# estimator therefore discards any sample where delivery reached this fraction
+# of the rate we ourselves imposed.
+SHAPING_LIMITED_FRACTION = 0.92
+# Delivered throughput is a hard lower bound on capacity: the link provably
+# carried it. The estimate is never allowed below the best rate actually
+# delivered within this trailing window.
+DELIVERED_FLOOR_WINDOW_SECONDS = 20.0
 # Or when the delay has risen by at least this much above the idle baseline.
 SATURATION_ADDED_DELAY_MS = 4.0
 # How much the estimate may move in one update, as a fraction of the current
@@ -57,6 +67,7 @@ class CapacityEstimator:
         self._window_seconds = 0.0
         self._last_saturated = False
         self._reason = "NO_SAMPLES_YET"
+        self._delivered_history: deque[tuple[datetime, float]] = deque(maxlen=400)
 
     def observe(
         self,
@@ -66,16 +77,35 @@ class CapacityEstimator:
         queue_occupancy_percent: float,
         added_delay_ms: float,
         elapsed_seconds: float,
+        shaped_total_mbps: float | None = None,
         now: datetime | None = None,
     ) -> CapacityEstimate:
-        """Feed one sampling interval of observations and return the estimate."""
+        """Feed one sampling interval of observations and return the estimate.
+
+        ``shaped_total_mbps`` is the total rate this controller is itself
+        imposing, when it is imposing one. It is the difference between "the
+        link could not go faster" and "we would not let it", and without it
+        the estimator mistakes its own policy for the link's limit.
+        """
         now = now or datetime.now(UTC)
         self._window_seconds = elapsed_seconds
 
-        saturated = (
+        if served_mbps > 0:
+            self._delivered_history.append((now, served_mbps))
+        self._prune_history(now)
+
+        congested = (
             queue_occupancy_percent >= SATURATION_QUEUE_OCCUPANCY_PERCENT
             or added_delay_ms >= SATURATION_ADDED_DELAY_MS
-        ) and offered_mbps >= served_mbps * 0.98
+        )
+        demand_met = offered_mbps >= served_mbps * 0.98
+        shaping_limited = (
+            shaped_total_mbps is not None
+            and shaped_total_mbps > 0
+            and served_mbps >= shaped_total_mbps * SHAPING_LIMITED_FRACTION
+        )
+
+        saturated = congested and demand_met and not shaping_limited
         self._last_saturated = saturated
         self._last_sample_mbps = served_mbps
 
@@ -85,12 +115,35 @@ class CapacityEstimator:
             self._last_valid_sample_at = now
             self._apply_sample(served_mbps)
             self._reason = "SATURATED_DELIVERY_RATE_SAMPLE"
+        elif shaping_limited:
+            self._reason = "SAMPLE_LIMITED_BY_OUR_OWN_SHAPING_IGNORED"
         elif self._estimate_mbps is None:
             self._reason = "LOW_DEMAND_CAPACITY_NOT_OBSERVABLE"
         else:
             self._reason = "NO_NEW_SATURATED_SAMPLE_RETAINING_ESTIMATE"
 
+        # Stop an existing estimate ratcheting below what the link has just
+        # been seen to carry. This is a floor on an estimate already made, not
+        # grounds to invent one: a quiet link delivering a little says nothing
+        # about its ceiling, and treating that as an estimate would shape a
+        # fast link down to the trickle it happened to be carrying.
+        if self._estimate_mbps is not None:
+            floor = self._delivered_floor()
+            if floor is not None and self._estimate_mbps < floor:
+                self._estimate_mbps = floor
+                self._reason = "RAISED_TO_OBSERVED_DELIVERED_RATE"
+
         return self.current(now=now)
+
+    def _prune_history(self, now: datetime) -> None:
+        cutoff = now.timestamp() - DELIVERED_FLOOR_WINDOW_SECONDS
+        while self._delivered_history and self._delivered_history[0][0].timestamp() < cutoff:
+            self._delivered_history.popleft()
+
+    def _delivered_floor(self) -> float | None:
+        if not self._delivered_history:
+            return None
+        return max(rate for _, rate in self._delivered_history)
 
     def _apply_sample(self, sample_mbps: float) -> None:
         if self._estimate_mbps is None:

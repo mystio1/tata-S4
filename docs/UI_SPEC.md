@@ -188,7 +188,9 @@ Do not use fabricated live values. The supplied image contains example UI number
 ## 6. Motion quality and performance
 
 - Smooth, restrained transitions; no constant camera shaking or excessive flashes.
-- Use a fixed/controlled camera with optional limited orbit controls.
+- Use a restrained 10-second camera cycle: establish the full topology, sweep
+  toward the Internet and gateway, then return to the wide view. Hold a steady
+  elevated view when reduced motion is requested.
 - Avoid generic floating holograms and decorative AI brains.
 - Use instanced particles and reusable geometries/materials.
 - Pause expensive animations when the tab is hidden.

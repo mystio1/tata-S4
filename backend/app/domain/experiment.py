@@ -98,11 +98,10 @@ class ExperimentCreateRequest(StrictModel):
 
     @model_validator(mode="after")
     def _reject_unsupported_data_modes(self) -> ExperimentCreateRequest:
-        if self.data_mode is DataMode.LIVE:
-            raise ValueError(
-                "LIVE data mode requires a connected Ubuntu laboratory agent. "
-                "It is not available in this build."
-            )
+        # LIVE is accepted by the schema but the manager still refuses it
+        # unless a laboratory agent is actually configured, reachable and
+        # enabled. Schema validation cannot see any of that, so the real
+        # check lives where the agent's health is known.
         if self.data_mode is DataMode.REPLAY:
             raise ValueError("REPLAY data mode is not implemented yet.")
         return self

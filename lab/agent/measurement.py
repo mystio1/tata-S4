@@ -18,7 +18,6 @@ project:
 from __future__ import annotations
 
 import logging
-import os
 import re
 import shutil
 import signal
@@ -90,6 +89,7 @@ class GeneratorPool:
             if _terminate(process):
                 stopped += 1
         self.servers.clear()
+        stop_probe()
         return stopped
 
 
@@ -368,9 +368,10 @@ def _last_interval(log_path: Path) -> dict[str, Any] | None:
             total = int(match.group("total"))
             entry["jitter_ms"] = float(match.group("jitter"))
             entry["packet_loss_percent"] = round(lost / total * 100.0, 4) if total else None
-            entry["packets_per_second"] = (
-                round(total / max(0.001, entry["window_end_seconds"] - entry["window_start_seconds"]), 2)
+            window = max(
+                0.001, entry["window_end_seconds"] - entry["window_start_seconds"]
             )
+            entry["packets_per_second"] = round(total / window, 2)
         last = entry
     return last
 
@@ -460,3 +461,274 @@ def class_throughput(interface: str) -> dict[str, dict[str, Any]]:
 def reset_counters() -> None:
     """Forget the previous counter sample so the next read starts clean."""
     _LAST_CLASS_COUNTERS.clear()
+
+
+# ---------------------------------------------------------------------------
+# Continuous probe
+# ---------------------------------------------------------------------------
+#
+# A probe spawned per request would make every metrics call wait a second or
+# more for replies, which is far too slow for a controller sampling at one
+# hertz. Instead one long-running ping writes timestamped replies to a log and
+# each metrics call reads the recent window out of it. The probe interval is
+# the sampling rate; the controller's tick rate does not affect it.
+
+PROBE_LOG = LOG_DIRECTORY / "probe.log"
+_PROBE_PROCESS: subprocess.Popen[bytes] | None = None
+
+# ping -D prefixes each reply with a wall-clock timestamp:
+#   [1730000000.123456] 64 bytes from 10.200.3.2: icmp_seq=5 ttl=64 time=18.3 ms
+_PROBE_LINE = re.compile(
+    r"\[(?P<stamp>\d+\.\d+)\].*icmp_seq=(?P<seq>\d+).*time=(?P<rtt>[\d.]+) ms"
+)
+
+
+def start_probe(interval: float = PROBE_INTERVAL_SECONDS) -> None:
+    """Start the continuous round-trip probe from the home namespace."""
+    global _PROBE_PROCESS
+    stop_probe()
+    LOG_DIRECTORY.mkdir(parents=True, exist_ok=True)
+    PROBE_LOG.unlink(missing_ok=True)
+    checked = max(0.05, min(1.0, float(interval)))
+
+    resolved = [
+        executable("ip"), "netns", "exec", NS_HOME,
+        executable("ping"), "-D", "-i", f"{checked:g}", "-W", "2", IP_WAN,
+    ]
+    handle = open(PROBE_LOG, "wb")  # noqa: SIM115 - owned by the probe's lifetime
+    _PROBE_PROCESS = subprocess.Popen(  # noqa: S603 - fixed paths, argument array
+        resolved, stdout=handle, stderr=subprocess.DEVNULL, shell=False
+    )
+    logger.info("continuous probe started at %.2f s interval", checked)
+
+
+def stop_probe() -> None:
+    global _PROBE_PROCESS
+    if _PROBE_PROCESS is not None:
+        _terminate(_PROBE_PROCESS)
+        _PROBE_PROCESS = None
+
+
+def probe_running() -> bool:
+    return _PROBE_PROCESS is not None and _PROBE_PROCESS.poll() is None
+
+
+def recent_probe(window_seconds: float = 2.0) -> dict[str, Any]:
+    """Summarise the probe replies from the last ``window_seconds``.
+
+    Jitter is the mean absolute difference between consecutive round-trip
+    times, the same definition used everywhere else in the project.
+
+    Loss is derived from the sequence numbers: a reply that never arrived
+    leaves a gap. When no reply at all landed in the window every statistic is
+    ``None``, because a probe that failed did not measure zero delay.
+    """
+    if not PROBE_LOG.exists():
+        return _empty_probe("The continuous probe has not been started.")
+
+    try:
+        text = PROBE_LOG.read_text(errors="replace")
+    except OSError:
+        return _empty_probe("The probe log could not be read.")
+
+    cutoff = time.time() - max(0.2, float(window_seconds))
+    samples: list[tuple[int, float]] = []
+    for line in text.splitlines():
+        match = _PROBE_LINE.search(line)
+        if not match:
+            continue
+        if float(match.group("stamp")) < cutoff:
+            continue
+        samples.append((int(match.group("seq")), float(match.group("rtt"))))
+
+    if not samples:
+        return _empty_probe("No probe reply arrived in the measurement window.")
+
+    rtts = [rtt for _, rtt in samples]
+    deltas = [abs(b - a) for a, b in zip(rtts, rtts[1:], strict=False)]
+    sequences = [seq for seq, _ in samples]
+    expected = sequences[-1] - sequences[0] + 1
+    received = len(samples)
+    loss = max(0.0, (expected - received) / expected * 100.0) if expected > 0 else 0.0
+
+    return {
+        "probes_sent": expected,
+        "probes_received": received,
+        "packet_loss_percent": round(loss, 4),
+        "rtt_min_ms": round(min(rtts), 4),
+        "rtt_ms": round(sum(rtts) / len(rtts), 4),
+        "rtt_max_ms": round(max(rtts), 4),
+        "jitter_ms": round(sum(deltas) / len(deltas), 4) if deltas else 0.0,
+        "window_seconds": window_seconds,
+        "reason": None,
+    }
+
+
+def _empty_probe(reason: str) -> dict[str, Any]:
+    return {
+        "probes_sent": 0,
+        "probes_received": 0,
+        "packet_loss_percent": None,
+        "rtt_min_ms": None,
+        "rtt_ms": None,
+        "rtt_max_ms": None,
+        "jitter_ms": None,
+        "window_seconds": None,
+        "reason": reason,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Per-flow counters from the kernel
+# ---------------------------------------------------------------------------
+#
+# A counting filter per flow sits on the gateway's ingress qdiscs with a
+# pass action, so every packet is counted and then continues on its way.
+# These give the flow observer real byte *and* packet counts, which is what
+# makes a measured mean packet size possible. Assuming a packet size instead
+# would quietly decide the classifier's answer, since packet size is its
+# leading discriminator.
+#
+# Each flow's filter gets its own preference derived from its port, so a
+# counter can be matched back to its flow without parsing match patterns.
+
+COUNTER_PREFERENCE_BASE = 5000
+_COUNTER_INSTALLED: list[dict[str, Any]] = []
+_LAST_FLOW_COUNTERS: dict[int, tuple[float, int, int]] = {}
+
+
+def counter_preference(port: int) -> int:
+    """A stable, distinct filter preference for one generator port."""
+    return validate_port(port) - COUNTER_PREFERENCE_BASE
+
+
+def install_flow_counters(flows: list[dict[str, Any]]) -> int:
+    """Install one counting filter per flow, in the matching direction.
+
+    Inbound traffic from a generator carries its port as the source; outbound
+    traffic carries it as the destination, so each direction is counted on
+    the interface where that flow actually arrives.
+    """
+    from .safety import IF_GW_LAN, PROTOCOL_NUMBERS
+
+    _COUNTER_INSTALLED.clear()
+    _LAST_FLOW_COUNTERS.clear()
+    installed = 0
+
+    for flow in flows:
+        port = validate_port(flow["port"])
+        protocol = validate_protocol(flow["protocol"])
+        download = flow.get("direction") == "DOWNLOAD"
+
+        # Both hooks live on the local interface. A download is counted on
+        # egress, which is after the shaper, so the figure is what the device
+        # actually received. An upload is counted on ingress, as it arrives
+        # from the device and before the shaper, so that figure is offered
+        # load rather than delivered.
+        hook = "egress" if download else "ingress"
+        selector = "sport" if download else "dport"
+
+        in_namespace(
+            NS_GATEWAY,
+            [
+                "tc", "filter", "add", "dev", IF_GW_LAN, hook,
+                "protocol", "ip", "prio", str(counter_preference(port)), "u32",
+                "match", "ip", "protocol", str(PROTOCOL_NUMBERS[protocol]), "0xff",
+                "match", "ip", selector, str(port), "0xffff",
+                "action", "gact", "pass",
+            ],
+            check=False,
+        )
+        _COUNTER_INSTALLED.append(
+            {
+                "port": port,
+                "hook": hook,
+                "name": flow.get("name", str(port)),
+                "direction": "DOWNLOAD" if download else "UPLOAD",
+                "protocol": protocol,
+                "measures": "delivered" if download else "offered",
+            }
+        )
+        installed += 1
+
+    logger.info("installed %d per-flow counting filters", installed)
+    return installed
+
+
+_FILTER_PREF = re.compile(r"filter protocol ip pref (?P<pref>\d+) u32")
+_FILTER_SENT = re.compile(r"Sent (?P<bytes>\d+) bytes (?P<packets>\d+) pkt")
+
+
+def _read_counters(hook: str) -> dict[int, tuple[int, int]]:
+    """Parse ``(bytes, packets)`` per filter preference on one hook."""
+    from .safety import IF_GW_LAN
+
+    output = in_namespace(
+        NS_GATEWAY,
+        ["tc", "-s", "filter", "show", "dev", IF_GW_LAN, hook],
+        check=False,
+    ).stdout
+
+    counters: dict[int, tuple[int, int]] = {}
+    current: int | None = None
+    for line in output.splitlines():
+        pref = _FILTER_PREF.search(line)
+        if pref:
+            current = int(pref.group("pref"))
+            continue
+        if current is None:
+            continue
+        sent = _FILTER_SENT.search(line)
+        if sent:
+            counters[current] = (int(sent.group("bytes")), int(sent.group("packets")))
+            current = None
+    return counters
+
+
+def flow_counters() -> dict[str, dict[str, Any]]:
+    """Measured rate and packet size per flow, from the kernel's counters.
+
+    A flow with no second sample yet reports ``None`` for its rates rather
+    than zero: one counter reading is a total, not a rate.
+    """
+    readings: dict[str, dict[int, tuple[int, int]]] = {
+        hook: _read_counters(hook) for hook in ("egress", "ingress")
+    }
+
+    now = time.monotonic()
+    result: dict[str, dict[str, Any]] = {}
+
+    for entry in _COUNTER_INSTALLED:
+        port = int(entry["port"])
+        pref = counter_preference(port)
+        reading = readings.get(str(entry["hook"]), {}).get(pref)
+        if reading is None:
+            continue
+        total_bytes, total_packets = reading
+
+        throughput_mbps: float | None = None
+        packets_per_second: float | None = None
+        previous = _LAST_FLOW_COUNTERS.get(pref)
+        if previous is not None:
+            elapsed = now - previous[0]
+            if elapsed > 0.05 and total_bytes >= previous[1]:
+                throughput_mbps = round((total_bytes - previous[1]) * 8 / elapsed / 1e6, 4)
+                packets_per_second = round((total_packets - previous[2]) / elapsed, 3)
+        _LAST_FLOW_COUNTERS[pref] = (now, total_bytes, total_packets)
+
+        result[str(entry["name"])] = {
+            "port": port,
+            "direction": entry["direction"],
+            "protocol": entry["protocol"],
+            "measures": entry["measures"],
+            "total_bytes": total_bytes,
+            "total_packets": total_packets,
+            "throughput_mbps": throughput_mbps,
+            "packets_per_second": packets_per_second,
+            # Measured, not assumed. This is what lets the classifier see a
+            # flow's real packet size.
+            "mean_packet_bytes": (
+                round(total_bytes / total_packets, 2) if total_packets else None
+            ),
+        }
+    return result

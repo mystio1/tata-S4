@@ -263,59 +263,15 @@ class SimulatedEnforcer(Enforcer):
             error=read_back.mismatch_detail,
         )
 
+# The live enforcer lives in its own module because it is the only part of
+# this package that talks to a privileged process over a network. Keeping
+# it separate makes that boundary obvious. It is re-exported here so
+# callers can import either enforcer from one place.
+from app.control.lab_enforcer import LabAgentEnforcer  # noqa: E402
 
-class LabAgentEnforcer(Enforcer):
-    """Boundary to the privileged Ubuntu laboratory agent.
-
-    Not reachable in this build. Every call refuses rather than reporting a
-    success that was never verified against real Linux state.
-    """
-
-    data_mode = DataMode.LIVE
-
-    def __init__(self, settings: Settings) -> None:
-        self._settings = settings
-
-    @property
-    def is_configured(self) -> bool:
-        return bool(
-            self._settings.lab_agent_url
-            and self._settings.lab_agent_token
-            and self._settings.enable_live_enforcement
-        )
-
-    def _refusal(self, policy_id: str) -> EnforcementResult:
-        now = datetime.now(UTC)
-        return EnforcementResult(
-            policy_id=policy_id,
-            transaction_id=f"txn-{next(_transaction_counter):05d}",
-            status=EnforcementStatus.FAILED_SAFE_MODE,
-            data_mode=DataMode.LIVE,
-            requested_at=now,
-            completed_at=now,
-            apply_duration_ms=0.0,
-            snapshot_id=None,
-            read_back=None,
-            error=(
-                "No Ubuntu laboratory agent is connected. Live Linux traffic control is "
-                "implemented in Phase 3 and must never be reported as applied without a "
-                "verified read-back of real queue discipline state."
-            ),
-        )
-
-    def snapshot(self) -> str:
-        raise RuntimeError("No laboratory agent is connected; nothing can be snapshotted.")
-
-    def apply_policy(self, proposal: PolicyProposal) -> EnforcementResult:
-        return self._refusal(proposal.policy_id)
-
-    def restore_snapshot(self, snapshot_id: str) -> EnforcementResult:
-        return self._refusal("restore")
-
-    def read_state(self) -> ReadBackState:
-        return ReadBackState(
-            data_mode=DataMode.LIVE,
-            source="no laboratory agent connected",
-            matches_intent=False,
-            mismatch_detail="Live state cannot be read because no agent is connected.",
-        )
+__all__ = [
+    "Enforcer",
+    "SimulatedEnforcer",
+    "LabAgentEnforcer",
+    "READ_BACK_TOLERANCE_MBPS",
+]

@@ -977,3 +977,111 @@ class TestIntentLeases:
         )
         assert manager.boosted_classes(NOW) != ()
         assert manager.boosted_classes(NOW + timedelta(seconds=20)) == ()
+
+
+class TestCapacityRatchet:
+    """The estimator must not mistake our own shaping for the link's limit.
+
+    Shaping below the link, measuring the shaped rate, lowering the estimate
+    and shaping lower again is a positive feedback loop. Left unchecked it
+    walks a 100 Mbps link down to a few megabits, which is exactly what it
+    did on the laboratory before these two guards existed.
+    """
+
+    def _saturate(self, estimator: CapacityEstimator, mbps: float, **extra) -> None:
+        for _ in range(8):
+            estimator.observe(
+                served_mbps=mbps,
+                offered_mbps=mbps * 1.3,
+                queue_occupancy_percent=40.0,
+                added_delay_ms=60.0,
+                elapsed_seconds=1.0,
+                now=NOW,
+                **extra,
+            )
+
+    def test_a_sample_limited_by_our_own_shaping_is_ignored(
+        self, estimator: CapacityEstimator
+    ) -> None:
+        self._saturate(estimator, 95.0)
+        before = estimator.current(now=NOW).usable_capacity_mbps
+        assert before is not None
+
+        # Now we shape to 40 Mbps and naturally only ever observe 40.
+        self._saturate(estimator, 40.0, shaped_total_mbps=40.0)
+        after = estimator.current(now=NOW)
+        assert after.usable_capacity_mbps == pytest.approx(before, rel=0.01)
+        assert after.reason == "SAMPLE_LIMITED_BY_OUR_OWN_SHAPING_IGNORED"
+
+    def test_the_floor_does_not_invent_an_estimate_on_a_quiet_link(
+        self, estimator: CapacityEstimator
+    ) -> None:
+        """A trickle over an idle link says nothing about its ceiling.
+
+        Treating it as an estimate would shape a fast link down to whatever
+        it happened to be carrying.
+        """
+        for _ in range(10):
+            estimator.observe(
+                served_mbps=2.0,
+                offered_mbps=2.0,
+                queue_occupancy_percent=0.0,
+                added_delay_ms=0.0,
+                elapsed_seconds=1.0,
+                now=NOW,
+            )
+        assert estimator.current(now=NOW).usable_capacity_mbps is None
+
+    def test_an_existing_estimate_is_floored_by_delivered_rate(
+        self, estimator: CapacityEstimator
+    ) -> None:
+        self._saturate(estimator, 40.0)
+        # The link then demonstrably carries far more than the estimate.
+        for _ in range(6):
+            estimator.observe(
+                served_mbps=90.0,
+                offered_mbps=95.0,
+                queue_occupancy_percent=30.0,
+                added_delay_ms=40.0,
+                elapsed_seconds=1.0,
+                now=NOW,
+            )
+        current = estimator.current(now=NOW)
+        assert current.usable_capacity_mbps is not None
+        assert current.usable_capacity_mbps >= 90.0 * 0.95 - 1e-6
+
+    def test_repeated_shaped_samples_do_not_walk_the_estimate_down(
+        self, estimator: CapacityEstimator
+    ) -> None:
+        self._saturate(estimator, 95.0)
+        shaped = estimator.current(now=NOW).usable_capacity_mbps
+        assert shaped is not None
+
+        # Ten rounds of the feedback loop: shape to the estimate, observe it.
+        for _ in range(10):
+            total = estimator.current(now=NOW).usable_capacity_mbps
+            assert total is not None
+            self._saturate(estimator, total, shaped_total_mbps=total)
+
+        final = estimator.current(now=NOW).usable_capacity_mbps
+        assert final is not None
+        assert final >= shaped * 0.95
+
+    def test_an_unshaped_drop_is_still_tracked_downward(
+        self, estimator: CapacityEstimator
+    ) -> None:
+        """A real bottleneck reduction must still be followed."""
+        self._saturate(estimator, 95.0)
+        later = NOW + timedelta(seconds=60)
+        for _ in range(12):
+            estimator.observe(
+                served_mbps=19.0,
+                offered_mbps=90.0,
+                queue_occupancy_percent=80.0,
+                added_delay_ms=200.0,
+                elapsed_seconds=1.0,
+                now=later,
+            )
+        final = estimator.current(now=later).usable_capacity_mbps
+        assert final is not None
+        assert final < 40.0

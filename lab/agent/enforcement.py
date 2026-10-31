@@ -80,6 +80,10 @@ READ_BACK_TOLERANCE_FRACTION = 0.01
 CODEL_TARGET_MS = 5
 CODEL_INTERVAL_MS = 100
 
+# Filter preference for the ingress redirect. Counting filters occupy the
+# lower preferences so a packet is counted before it is redirected.
+REDIRECT_PREFERENCE = 900
+
 _RATE_PATTERN = re.compile(r"(?P<value>[\d.]+)(?P<unit>[KMGT]?)(?:bit|bps)", re.IGNORECASE)
 _UNIT_SCALE = {"": 1.0, "K": 1e3, "M": 1e6, "G": 1e9, "T": 1e12}
 
@@ -263,14 +267,24 @@ def read_all_state() -> dict[str, Any]:
 
 
 def clear_shaping() -> None:
-    """Remove every queueing discipline this agent installs.
+    """Remove the shaping this agent installs, and nothing else.
 
-    Leaves the emulated bottleneck alone: that belongs to the provider
-    namespace and is not the gateway's to remove.
+    Two things are deliberately left alone. The emulated bottleneck belongs
+    to the provider namespace and is not the gateway's to remove. The ingress
+    qdiscs carry the per-flow measurement counters, so tearing them down with
+    the shaping would blind the observer every time a policy changed; only
+    the redirect filter is removed from them.
     """
     in_namespace(NS_GATEWAY, ["tc", "qdisc", "del", "dev", IF_GW_WAN, "root"], check=False)
-    in_namespace(NS_GATEWAY, ["tc", "qdisc", "del", "dev", IF_GW_WAN, "ingress"], check=False)
     in_namespace(NS_GATEWAY, ["tc", "qdisc", "del", "dev", IF_IFB, "root"], check=False)
+    in_namespace(
+        NS_GATEWAY,
+        [
+            "tc", "filter", "del", "dev", IF_GW_WAN, "parent", "ffff:",
+            "prio", str(REDIRECT_PREFERENCE),
+        ],
+        check=False,
+    )
 
 
 def _install_htb(interface: str, direction: DirectionProfile) -> None:
@@ -349,14 +363,19 @@ def _install_filters(
 
 
 def _install_ingress_redirect() -> None:
-    """Send everything arriving on the wide area network interface to the
-    Intermediate Functional Block device, where it can be shaped on egress."""
-    in_namespace(NS_GATEWAY, ["tc", "qdisc", "add", "dev", IF_GW_WAN, "handle", "ffff:", "ingress"])
+    """Redirect inbound traffic to the Intermediate Functional Block device.
+
+    The ingress qdisc already exists: the topology creates it so the
+    measurement counters can live there permanently. This adds only the
+    redirect, at a preference after the counting filters so each packet is
+    counted before it is moved.
+    """
     in_namespace(
         NS_GATEWAY,
         [
             "tc", "filter", "add", "dev", IF_GW_WAN, "parent", "ffff:",
-            "protocol", "ip", "prio", "1", "u32", "match", "u32", "0", "0",
+            "protocol", "ip", "prio", str(REDIRECT_PREFERENCE), "u32",
+            "match", "u32", "0", "0",
             "action", "mirred", "egress", "redirect", "dev", IF_IFB,
         ],
     )

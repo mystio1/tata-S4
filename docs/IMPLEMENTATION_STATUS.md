@@ -85,35 +85,74 @@ capability has been tested against a real Ubuntu laboratory agent.
 | No command-execution endpoint exists | TESTED | `test_there_is_no_command_execution_endpoint` |
 | Unmeasured values render as an em dash, not zero | TESTED | `frontend` formatting tests |
 
-## Phases 2 to 7 — NOT_STARTED
+## Phase 2 — Ubuntu namespace laboratory · TESTED
+
+| Capability | Status | Evidence | Limitations |
+|---|---|---|---|
+| Isolated namespace testbed | TESTED | `lab/tests/test_laboratory.py::TestTopology` | Four namespaces; runs on Ubuntu 24.04 under the Windows Subsystem for Linux version 2, kernel 6.6 |
+| Emulated bottleneck | TESTED | `netem` rate, delay and finite buffer on its own namespace | Never read by the controller |
+| Real traffic generators | IMPLEMENTED_LIVE | `iperf3` processes in the home namespace | `iperf3` always sends maximum-sized segments, so the web/voice flow is a poor likeness |
+| Real probes | TESTED | continuous `ping`, read as a trailing window | — |
+| Per-flow measurement | TESTED | counting filters with a pass action, measured bytes and packets | Download counted after the shaper; upload counted before it, so upload is offered load |
+| Per-class measurement | IMPLEMENTED_LIVE | differenced Hierarchical Token Bucket byte counters | — |
+| Resettable laboratory | TESTED | `lab/scripts/lab-reset.sh`, rebuilt from nothing each run | — |
+
+## Phase 3 — Real Linux enforcement · TESTED
+
+| Capability | Status | Evidence | Limitations |
+|---|---|---|---|
+| Upload shaping | TESTED | HTB classes with FQ-CoDel on the wide area network egress | — |
+| Download shaping | TESTED | ingress redirect to an Intermediate Functional Block, then HTB with FQ-CoDel | — |
+| Transactional apply | TESTED | `TestEnforcement`; snapshot, apply, read back, compare | — |
+| `APPLIED` only on verified read-back | TESTED | `test_a_policy_is_applied_and_confirmed_by_read_back` | No code path can produce it otherwise |
+| Rollback and restore verification | TESTED | `test_a_snapshot_restores_and_verifies` | — |
+| Default class for unmatched traffic | TESTED | `test_unmatched_traffic_still_has_a_class` | A shaping gap cannot black-hole a flow |
+| Privileged agent boundary | TESTED | `lab/tests/test_service.py` (30 tests) | Token authentication, loopback binding, audit log |
+| No command interface | TESTED | `test_the_published_interface_exposes_no_command_endpoint` | No body accepts an interface or namespace name |
+| `LIVE` data mode end to end | IMPLEMENTED_LIVE | dashboard, API and agent verified together | — |
+| Shaping relieves the queue | TESTED | `test_shaping_below_the_bottleneck_removes_the_standing_queue` | 311 ms to 18.4 ms measured |
+| Independent watchdog against real failure | NOT_STARTED | `Watchdog` is tested in isolation only | Fault injection is outstanding |
+
+## Remaining Round 1 work
+
+| Item | Status | Blocker |
+|---|---|---|
+| **Model 1 training and integration** | NOT_STARTED | Needs labelled captures from the laboratory. The pipeline, feature schema and fallback all exist; only the trained artifact is missing. Until then Mode 3 is marked degraded and must not be presented as a Mode 3 result. |
+| **Mode 2 against Mode 3 comparison** | NOT_STARTED | Depends on Model 1 |
+| **Repeated runs with reports** | PARTIAL | A single run produces a report with medians and interquartile ranges; aggregation across repeats is not built |
+| **Public dashboard URL** | NOT_STARTED | Deployment not configured |
+| **Public repository** | NOT_STARTED | Local git only; no remote |
+| **Watchdog fault injection** | NOT_STARTED | — |
+
+## Round 2 — NOT_STARTED
 
 | Phase | Contents | Blocker |
 |---|---|---|
-| Phase 2 | Ubuntu namespace laboratory, real baseline measurements | Needs a dedicated Ubuntu host or virtual machine |
-| Phase 3 | Real traffic control enforcement, rollback and watchdog on that laboratory | Depends on Phase 2 |
-| Phase 4 | Train Model 1, compare Mode 2 against Mode 3 | Needs labelled data from Phase 2 |
-| Phase 5 | Define the congestion event and horizon, train Model 2, compare Mode 3 against Mode 4 | Round 2; needs Phase 4 |
-| Phase 6 | Full experiment matrix, repeated runs, replay mode, CAKE benchmark | Depends on Phase 2 |
-| Phase 7 | Deployment, authentication, hardening | — |
+| Phase 5 | Define the congestion event and horizon, train Model 2, compare Mode 3 against Mode 4 | Needs Model 1 first |
+| Phase 6 | Full experiment matrix, replay mode, CAKE benchmark | CAKE is not available on this kernel |
+| Phase 7 | Advanced hardening | — |
 
 ## Known limitations and risks
 
-1. **No live enforcement.** Nothing in this build has touched Linux traffic
-   control. The transaction shape is exercised against the simulator so that
-   Phase 3 replaces one component rather than inventing the whole path.
-2. **Neither model is trained.** Modes 3 and 4 run, but every flow takes the
+1. **Neither model is trained.** Modes 3 and 4 run, but every flow takes the
    safe fallback. Those runs must not be presented as Mode 3 or Mode 4 results.
-3. **Policy weights are untuned.** They are documented, versioned and
+2. **Policy weights are untuned.** They are documented, versioned and
    defensible, but they have not been validated against held-out experiments.
    That is Round 2 work.
-4. **The rule classifier is a baseline, with known failure modes.** A streaming
+3. **The rule classifier is a baseline, with known failure modes.** A streaming
    buffer fill and a bulk transfer look alike over a short window; the observer
    carries a smoothed activity ratio across windows to separate them, which
    helps but does not eliminate the confusion. Closing that gap is Model 1's
    job and is how its value should be measured.
-5. **Simulated results are not predictions.** The Mode 1 against Mode 2
-   difference shows the control loop works as designed. It says nothing about
-   what the Linux implementation will achieve.
+4. **Laboratory results are emulations.** The namespaces, the bottleneck and
+   the generators are all synthetic. The numbers show the control loop works
+   against real Linux traffic control; they are not a measurement of any real
+   Internet service provider connection.
+5. **The capacity estimate can ratchet under shaping.** Once a policy is
+   installed the estimator only ever observes the shaped rate. Two guards
+   exist: a sample taken while our own shaper was binding is discarded, and
+   the estimate is floored by the best rate recently delivered. An early
+   version without them walked a 100 Mbps link down to 5 Mbps.
 6. **Frontend types are mirrored by hand** from the Python schemas. They are
    covered by contract tests, but generating them would remove a class of
    drift.

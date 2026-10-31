@@ -7,15 +7,15 @@ estimates how much of the link is usable, selects a bounded and fair policy,
 applies it, and then measures whether the result actually improved anything.
 If it did not, it puts the previous configuration back.
 
-**What this repository currently is.** A working engineering prototype of the
-first vertical slice: a React dashboard, a FastAPI backend, a deterministic
-laboratory simulator and the full decision pipeline from flow observation
-through to verification and rollback. Everything runs in the `SIMULATION` data
-mode and is labelled as such.
+**What this repository currently is.** A working engineering prototype with
+two data modes. `SIMULATION` runs a deterministic simulator entirely in
+process. `LIVE` runs the same controller against an isolated Linux testbed of
+network namespaces, applying **real traffic control** and confirming every
+change by reading the kernel's own state back.
 
-**What it is not yet.** There is no live Linux traffic control and neither
-machine-learning model is trained. Those are later phases, and nothing in the
-interface claims otherwise. See [Honest status](#honest-status).
+**What it is not yet.** Neither machine-learning model is trained, so Modes 3
+and 4 fall back to a safe `UNKNOWN` class and are marked degraded. Nothing in
+the interface claims otherwise. See [Honest status](#honest-status).
 
 ---
 
@@ -87,9 +87,15 @@ frontend/               React, TypeScript and Vite dashboard
   src/panels/           The engineering panels of the decision pipeline
   src/pages/            The eight pages
   src/store/            Normalised event and metric state
+lab/                    Isolated Linux testbed and the privileged agent
+  agent/                Topology, enforcement, measurement, scenarios, service
+  tests/                129 tests (18 need root on Linux)
 docs/                   Specifications (read these before changing behaviour)
 references/             Case study, proposal and the approved visual reference
 ```
+
+The laboratory is documented separately in [lab/README.md](lab/README.md),
+including how to run it and the safety boundary it enforces.
 
 ---
 
@@ -166,20 +172,23 @@ anyone.
 | M4 policy engine with scored candidates | Implemented and tested | `tests/test_control_plane.py::TestPolicyEngine` |
 | Safety Guard | Implemented and tested | `tests/test_control_plane.py::TestSafetyGuard` |
 | M5 enforcement, **simulated** | Implemented and tested | reported as `SIMULATED`, never `APPLIED` |
-| M5 enforcement, **real Linux traffic control** | **Not implemented** | Phase 3, needs an Ubuntu laboratory agent |
+| M5 enforcement, **real Linux traffic control** | Implemented and tested | HTB + FQ-CoDel with IFB download path; `lab/tests/test_laboratory.py` |
+| Isolated Linux testbed | Implemented and tested | four namespaces, netem bottleneck, resettable |
+| Privileged laboratory agent | Implemented and tested | allow-listed operations, token authentication, audit log |
 | M6 verification and rollback | Implemented and tested | `tests/test_control_plane.py::TestVerification` |
 | Independent watchdog | Implemented and tested | `tests/test_control_plane.py::TestWatchdog` |
 | Temporary intent leases | Implemented and tested | server-side expiry |
 | Dashboard, 3D scene, eight pages | Implemented and tested | `frontend/src/test/` |
-| `LIVE` data mode | **Not available** | needs a connected laboratory agent |
+| `LIVE` data mode | Implemented | offered only when an agent is reachable and enabled |
 | `REPLAY` data mode | **Not implemented** | Phase 6 |
 
 The rules the code actually enforces, not just documents:
 
-- A simulated policy application reports `SIMULATED`. The string `APPLIED` is
-  reserved for a verified read-back of real Linux queue discipline state, and
-  a test asserts it is never produced otherwise.
-- Requesting `LIVE` or `REPLAY` from the API is refused with an explanation.
+- A simulated policy application reports `SIMULATED`. `APPLIED` is returned
+  only after a verified read-back of real Linux queue discipline state, and a
+  test asserts the simulator never produces it.
+- `LIVE` is refused with an explanation unless a laboratory agent is
+  configured, reachable and enabled. `REPLAY` is refused outright.
 - Both models report `NOT_CONFIGURED`. Modes 3 and 4 are selectable but are
   marked degraded, every flow takes the safe `UNKNOWN` fallback, and the
   interface says those runs must not be presented as working results.
@@ -190,9 +199,24 @@ The rules the code actually enforces, not just documents:
   capacity estimator has to discover it from delivered rate and delay, which is
   what makes the bottleneck-drop scenario a real test of it.
 
-### Measured result from the primary scenario
+### Measured results
 
-Mode 1 against Mode 2, same scenario, same seed, 70 seconds, simulation:
+**Real Linux laboratory.** A greedy download against a 100 Mbps emulated link
+with an 18 ms base round-trip time, measured by `ping` and the kernel's own
+queue counters:
+
+| | round-trip time | added delay | jitter | bottleneck queue |
+|---|---|---|---|---|
+| Idle | 18.34 ms | - | - | 0 packets |
+| Bulk download, no shaping | 311.09 ms | +292.75 ms | 51.95 ms | 302 packets |
+| Bulk download, shaped | 18.41 ms | +0.07 ms | 0.25 ms | 10 packets |
+
+The queue did not disappear; it moved out of the provider's buffer, which the
+gateway cannot manage, into the gateway's own Fair Queuing Controlled Delay
+queue, which it can. Reproduce with
+`sudo .venv/bin/python lab/scripts/demo_before_after.py`.
+
+**Simulation.** Mode 1 against Mode 2, same scenario, same seed, 70 seconds:
 
 | | No QoS | Traditional adaptive |
 |---|---|---|
@@ -202,8 +226,8 @@ Mode 1 against Mode 2, same scenario, same seed, 70 seconds, simulation:
 | Bulk transferred | 713 MB | 633 MB |
 
 Delay-sensitive traffic is protected and the bulk transfer still makes
-progress. These are simulator figures, not measurements of a real link, and
-they do not predict what the Linux implementation will achieve.
+progress. These are laboratory emulations, not measurements of a real Internet
+service provider connection.
 
 ---
 
@@ -246,8 +270,16 @@ boundary; it currently refuses every request because no agent exists yet.
 
 ```bash
 npm run check          # everything
-npm run test:api       # 142 backend tests
+npm run test:api       # 150 backend tests
 npm run test:web       # 37 frontend tests
+```
+
+The laboratory has its own suite, on a Linux host:
+
+```bash
+cd lab
+.venv/bin/python -m pytest tests/test_safety.py tests/test_service.py   # 111
+sudo .venv/bin/python -m pytest tests/test_laboratory.py                # 18
 ```
 
 The backend suite covers the simulator's physics and determinism, each control
@@ -263,9 +295,9 @@ whole-application smoke test that walks every page.
 Phases 2 to 7 are described in `docs/IMPLEMENTATION_PLAN.md`, and the Round 1
 and Round 2 split is in `docs/ROUND_BOUNDARY.md`. In short:
 
-1. **Phase 2** — Ubuntu namespace laboratory, real measurements.
+1. **Phase 2** — Ubuntu namespace laboratory, real measurements. **Done.**
 2. **Phase 3** — real traffic control enforcement, snapshot, read-back and
-   rollback on that laboratory.
+   rollback. **Done**, apart from watchdog fault injection.
 3. **Phase 4** — train and integrate Model 1, then compare Mode 2 with Mode 3.
 4. **Phase 5** — define the congestion event and horizon, train Model 2, then
    compare Mode 3 with Mode 4.

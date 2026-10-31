@@ -6,7 +6,7 @@
  * * **Particle count** is driven by the flow's measured packet rate, through
  *   the documented aggregation in `particlesForPacketRate`. One particle
  *   stands for many packets; there is never one object per real packet.
- * * **Brightness and thickness** follow the flow's measured throughput.
+ * * **Brightness and particle size** follow the flow's measured throughput.
  * * **Travel speed is fixed.** It is a visual transit time, not a measurement.
  *   Tying particle speed to throughput would suggest that a faster link moves
  *   individual packets faster, which is not what throughput means. The speed
@@ -17,7 +17,7 @@
  * All particles for one flow live in a single instanced mesh.
  */
 
-import { useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import { useFrame } from '@react-three/fiber';
 import * as THREE from 'three';
 
@@ -43,7 +43,18 @@ export function particlesForPacketRate(packetsPerSecond: number): number {
   return Math.max(1, Math.min(MAX_PARTICLES_PER_FLOW, Math.round(packetsPerSecond / PACKETS_PER_PARTICLE)));
 }
 
-const PARTICLE_GEOMETRY = new THREE.SphereGeometry(0.075, 8, 8);
+const PARTICLE_GEOMETRY = new THREE.SphereGeometry(0.095, 10, 8);
+
+function curveFromKey(pathKey: string): THREE.CatmullRomCurve3 {
+  const points = pathKey.split('|').map((serializedPoint) => {
+    const [x, y, z] = serializedPoint.split(':').map(Number);
+    if (x === undefined || y === undefined || z === undefined) {
+      throw new Error('Packet path must contain three-dimensional points.');
+    }
+    return new THREE.Vector3(x, y, z);
+  });
+  return new THREE.CatmullRomCurve3(points, false, 'catmullrom', 0.1);
+}
 
 export interface PacketStreamProps {
   /** Ordered waypoints. Particles travel from the first to the last. */
@@ -72,13 +83,31 @@ export function PacketStream({
   const phaseRef = useRef(Math.random());
   const dummy = useMemo(() => new THREE.Object3D(), []);
 
-  const curve = useMemo(() => new THREE.CatmullRomCurve3(path, false, 'catmullrom', 0.1), [path]);
+  const pathKey = path.map((point) => `${point.x}:${point.y}:${point.z}`).join('|');
+  const curve = useMemo(() => curveFromKey(pathKey), [pathKey]);
   const count = particlesForPacketRate(packetsPerSecond);
   const color = muted ? CLASS_COLOR.UNKNOWN : CLASS_COLOR[trafficClass];
 
   const tubeGeometry = useMemo(
-    () => new THREE.TubeGeometry(curve, 40, 0.012 + intensity * 0.022, 6, false),
-    [curve, intensity],
+    () => new THREE.TubeGeometry(curve, 48, 0.045, 8, false),
+    [curve],
+  );
+  const coreGeometry = useMemo(
+    () => new THREE.TubeGeometry(curve, 48, 0.012, 6, false),
+    [curve],
+  );
+  const haloGeometry = useMemo(
+    () => new THREE.TubeGeometry(curve, 48, 0.105, 8, false),
+    [curve],
+  );
+
+  useEffect(
+    () => () => {
+      tubeGeometry.dispose();
+      coreGeometry.dispose();
+      haloGeometry.dispose();
+    },
+    [tubeGeometry, coreGeometry, haloGeometry],
   );
 
   useFrame((_, delta) => {
@@ -94,7 +123,7 @@ export function PacketStream({
       const t = (phaseRef.current + index / count) % 1;
       const point = curve.getPointAt(t);
       dummy.position.copy(point);
-      const scale = 0.72 + intensity * 0.6;
+      const scale = 0.9 + intensity * 0.65 + Math.sin(t * Math.PI * 2) * 0.08;
       dummy.scale.setScalar(muted ? scale * 0.68 : scale);
       dummy.updateMatrix();
       mesh.setMatrixAt(index, dummy.matrix);
@@ -111,12 +140,34 @@ export function PacketStream({
 
   return (
     <group>
+      <mesh geometry={haloGeometry}>
+        <meshBasicMaterial
+          color={color}
+          transparent
+          opacity={muted ? 0.045 : 0.07 + intensity * 0.08}
+          blending={THREE.AdditiveBlending}
+          depthWrite={false}
+          toneMapped={false}
+        />
+      </mesh>
       <mesh geometry={tubeGeometry}>
         <meshBasicMaterial
           color={color}
           transparent
-          opacity={muted ? 0.12 : 0.16 + intensity * 0.3}
+          opacity={muted ? 0.14 : 0.23 + intensity * 0.22}
+          blending={THREE.AdditiveBlending}
           depthWrite={false}
+          toneMapped={false}
+        />
+      </mesh>
+      <mesh geometry={coreGeometry}>
+        <meshBasicMaterial
+          color={color}
+          transparent
+          opacity={muted ? 0.28 : 0.72}
+          blending={THREE.AdditiveBlending}
+          depthWrite={false}
+          toneMapped={false}
         />
       </mesh>
       <instancedMesh
@@ -132,6 +183,7 @@ export function PacketStream({
           metalness={0.1}
           transparent
           opacity={muted ? 0.55 : 1}
+          toneMapped={false}
         />
       </instancedMesh>
     </group>

@@ -22,6 +22,7 @@ from app.domain.enums import (
     VerificationOutcome,
 )
 from app.domain.experiment import ExperimentCreateRequest
+from app.runtime.experiment import LiveModeUnavailable
 from app.state import AppState
 from tests.conftest import build_runtime, run_to_completion
 
@@ -118,13 +119,28 @@ class TestLifecycle:
 
 
 class TestDataModeHonesty:
-    def test_live_mode_is_refused(self) -> None:
-        with pytest.raises(ValueError, match="laboratory agent"):
-            ExperimentCreateRequest(
-                scenario_id="iso_during_call",
-                mode=ExperimentMode.NO_QOS,
-                data_mode=DataMode.LIVE,
+    def test_live_mode_is_refused_without_a_laboratory_agent(
+        self, state: AppState
+    ) -> None:
+        """The refusal lives where agent reachability is actually known.
+
+        The schema accepts LIVE so a properly configured deployment can use
+        it; the manager is what checks that an agent exists, is reachable and
+        is enabled before a live run can be created.
+        """
+        with pytest.raises(LiveModeUnavailable, match="laboratory agent"):
+            state.manager.create(
+                ExperimentCreateRequest(
+                    scenario_id="iso_during_call",
+                    mode=ExperimentMode.NO_QOS,
+                    data_mode=DataMode.LIVE,
+                )
             )
+
+    def test_live_mode_is_not_advertised_as_supported(self, state: AppState) -> None:
+        available, reason = state.manager.live_available()
+        assert available is False
+        assert reason
 
     def test_replay_mode_is_refused(self) -> None:
         with pytest.raises(ValueError, match="REPLAY"):

@@ -5,15 +5,15 @@
   "description": "QoSense: adaptive, intent-aware home Quality of Service engine",
   "scripts": {
     "dev": "concurrently -n api,web -c cyan,magenta \"npm:dev:api\" \"npm:dev:web\"",
-    "dev:api": "cd backend && .venv/Scripts/python -m uvicorn app.main:app --reload --port 8000",
+    "dev:api": "cd backend && .\\.venv\\Scripts\\python -m uvicorn app.main:app --reload --port 8000",
     "dev:web": "npm --prefix frontend run dev",
     "demo:simulation": "npm run dev",
     "build": "npm --prefix frontend run build",
     "test": "npm run test:api && npm run test:web",
-    "test:api": "cd backend && .venv/Scripts/python -m pytest -q",
+    "test:api": "cd backend && .\\.venv\\Scripts\\python -m pytest -q",
     "test:web": "npm --prefix frontend run test",
     "lint": "npm run lint:api && npm run lint:web",
-    "lint:api": "cd backend && .venv/Scripts/python -m ruff check .",
+    "lint:api": "cd backend && .\\.venv\\Scripts\\python -m ruff check .",
     "lint:web": "npm --prefix frontend run lint",
     "typecheck": "npm --prefix frontend run typecheck",
     "check": "npm run lint && npm run typecheck && npm run test"

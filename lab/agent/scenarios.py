@@ -121,7 +121,9 @@ class LabScenario:
         }
 
 
-def _common_parameters(download: float, upload: float, duration: float) -> tuple[ParameterBound, ...]:
+def _common_parameters(
+    download: float, upload: float, duration: float
+) -> tuple[ParameterBound, ...]:
     return (
         ParameterBound(
             "bottleneck_download_mbps", "Bottleneck download rate", "Mbps",

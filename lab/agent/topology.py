@@ -57,7 +57,6 @@ from .safety import (
     IF_WAN,
     IP_GW_LAN,
     IP_GW_WAN,
-    IP_HOME,
     IP_ISP_GW,
     IP_ISP_WAN,
     IP_WAN,
@@ -204,6 +203,22 @@ def build(link: LinkProfile | None = None) -> LinkProfile:
     # The Intermediate Functional Block device the download path redirects to.
     in_namespace(NS_GATEWAY, ["ip", "link", "add", IF_IFB, "type", "ifb"])
     in_namespace(NS_GATEWAY, ["ip", "link", "set", IF_IFB, "up"])
+
+    # Permanent measurement hooks, carrying no shaping, so they exist whether
+    # or not a policy is installed and survive every policy change.
+    #
+    # The wide area network interface gets a plain ingress qdisc, which is
+    # where the download path's redirect to the Intermediate Functional Block
+    # attaches.
+    in_namespace(
+        NS_GATEWAY, ["tc", "qdisc", "add", "dev", IF_GW_WAN, "handle", "ffff:", "ingress"]
+    )
+    # The local interface gets clsact, which offers an egress hook as well as
+    # an ingress one. That egress hook is the only place a download can be
+    # counted *after* shaping: counting it as it arrives from the provider
+    # measures what was sent, not what was delivered, and a shaped flow would
+    # read at full speed while actually being limited.
+    in_namespace(NS_GATEWAY, ["tc", "qdisc", "add", "dev", IF_GW_LAN, "clsact"])
 
     apply_bottleneck(profile)
     logger.info(

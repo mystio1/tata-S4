@@ -1,0 +1,19 @@
+[project]
+name = "qosense-lab-agent"
+version = "0.1.0"
+description = "QoSense privileged laboratory agent for the isolated Linux testbed"
+requires-python = ">=3.11"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["B008"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+  "laboratory: needs root on a Linux host with the traffic-control modules",
+]

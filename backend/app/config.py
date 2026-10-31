@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     # Whether the server advances running experiments on its own. Tests turn
     # this off so they can step the simulator deterministically.
     autorun_experiment_loop: bool = True
+    # A live run samples a real link, so it ticks far slower than the
+    # simulator: a probe window needs time to actually contain probes.
+    live_tick_seconds: float = Field(default=1.0, ge=0.25, le=10.0)
     event_history_limit: int = Field(default=2000, ge=100)
     subscriber_queue_limit: int = Field(default=512, ge=32)
 
