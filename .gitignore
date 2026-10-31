@@ -1,0 +1,26 @@
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+node_modules/
+dist/
+build/
+coverage/
+.coverage
+*.sqlite3
+*.db
+artifacts/private/
+artifacts/local-data/
+logs/
+.DS_Store
+
+# Root tooling
+/node_modules/
+/frontend/dist/
+/backend/.venv/

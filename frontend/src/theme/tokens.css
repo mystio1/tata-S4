@@ -1,0 +1,68 @@
+/*
+ * QoSense visual system: Theme 05, Deep Teal and Bronze.
+ *
+ * Bronze is the brand accent. It is never used in place of a traffic class
+ * colour, because the class legend has to mean the same thing on every page
+ * and in the three-dimensional scene.
+ */
+
+:root {
+  /* Surfaces */
+  --bg: #081c1d;
+  --surface: #12302d;
+  --surface-raised: #1c3331;
+  --surface-sunken: #0b2323;
+  --border: #1f3f3c;
+  --border-strong: #2d5450;
+
+  /* Brand and text */
+  --bronze: #c69a5b;
+  --bronze-dim: #8d6c3e;
+  --champagne: #e9e2d5;
+  --text: #e9e2d5;
+  --text-muted: #aab9b2;
+  --text-faint: #7b8d87;
+
+  /* Status */
+  --success: #58b99d;
+  --warning: #e58a45;
+  --critical: #d85b52;
+  --info: #4fcbd0;
+
+  /* Traffic classes. These are semantic and must not be re-themed. */
+  --class-interactive: #4fcbd0;
+  --class-gaming: #a78bda;
+  --class-streaming: #e79a47;
+  --class-bulk: #5796c8;
+  --class-web-voice: #58b99d;
+  --class-unknown: #7b8d87;
+
+  /* Data modes */
+  --mode-simulation: #c69a5b;
+  --mode-live: #58b99d;
+  --mode-replay: #a78bda;
+
+  /* Spacing and shape */
+  --radius-sm: 4px;
+  --radius: 8px;
+  --radius-lg: 12px;
+  --gap-xs: 4px;
+  --gap-sm: 8px;
+  --gap: 12px;
+  --gap-md: 16px;
+  --gap-lg: 24px;
+
+  /* Type */
+  --font-sans: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Mono", "SF Mono", ui-monospace, monospace;
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-base: 13px;
+  --text-md: 15px;
+  --text-lg: 19px;
+  --text-xl: 26px;
+  --text-2xl: 34px;
+
+  --shadow: 0 1px 2px rgb(0 0 0 / 40%), 0 8px 24px rgb(0 0 0 / 28%);
+  --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--bronze);
+}
