@@ -37,6 +37,8 @@ from __future__ import annotations
 
 import time
 
+import numpy as np
+
 from app.domain.enums import (
     CalibrationStatus,
     ClassificationDecision,
@@ -46,7 +48,13 @@ from app.domain.enums import (
     TrafficClass,
 )
 from app.domain.metrics import ClassificationResult, FlowFeatureWindow
+from app.models.aqose_features import PacketLevelRecord, feature_matrix, remap_probabilities
 from app.models.registry import MODEL_1, ModelRegistry
+
+# Minimum calibrated probability for the top class to be accepted. Below this
+# the model is not confident enough to act on its prediction, so UNKNOWN is
+# returned and policy falls back to the conservative handling for that class.
+MODEL_CONFIDENCE_THRESHOLD = 0.45
 
 RULES_VERSION = "deterministic-rules-v1"
 
@@ -125,8 +133,76 @@ class TrafficClassifier:
     def __init__(self, registry: ModelRegistry) -> None:
         self._registry = registry
 
+    def _classify_with_model1(
+        self, window: FlowFeatureWindow, packet_record: PacketLevelRecord
+    ) -> ClassificationResult:
+        """Run the AQoSE LightGBM artifact and remap its output to QoSense classes."""
+        started = time.perf_counter()
+        loaded = self._registry.traffic_classifier()
+        # Registry guards ensure this is not None when is_ready() is True.
+        assert loaded is not None
+
+        X = feature_matrix([packet_record])
+        raw_probs = loaded.estimator.predict_proba(X)[0]
+        aqose_classes = list(loaded.estimator.classes_)
+        aqose_prob_dict = dict(zip(aqose_classes, raw_probs.tolist(), strict=False))
+
+        qosense_probs = remap_probabilities(aqose_prob_dict)
+        elapsed_ms = round((time.perf_counter() - started) * 1000.0, 4)
+
+        self._registry.record_inference(MODEL_1.key, time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+
+        if not qosense_probs:
+            return ClassificationResult(
+                flow_id=window.flow_id,
+                model_version=self._registry.version(MODEL_1.key),
+                source=ClassificationSource.SAFE_FALLBACK,
+                predicted_class=TrafficClass.UNKNOWN,
+                probabilities={},
+                calibrated_confidence=None,
+                calibration_status=CalibrationStatus.CALIBRATED,
+                decision=ClassificationDecision.SAFE_FALLBACK,
+                reason="REMAP_EMPTY",
+                inference_ms=elapsed_ms,
+            )
+
+        best_class = max(qosense_probs, key=lambda c: qosense_probs[c])
+        confidence = qosense_probs[best_class]
+
+        prob_dict = dict(qosense_probs)
+
+        if confidence < MODEL_CONFIDENCE_THRESHOLD:
+            return ClassificationResult(
+                flow_id=window.flow_id,
+                model_version=self._registry.version(MODEL_1.key),
+                source=ClassificationSource.MODEL_1,
+                predicted_class=TrafficClass.UNKNOWN,
+                probabilities=prob_dict,
+                calibrated_confidence=round(confidence, 4),
+                calibration_status=CalibrationStatus.CALIBRATED,
+                decision=ClassificationDecision.SAFE_FALLBACK,
+                reason=f"LOW_CONFIDENCE_{round(confidence, 3)}",
+                inference_ms=elapsed_ms,
+            )
+
+        return ClassificationResult(
+            flow_id=window.flow_id,
+            model_version=self._registry.version(MODEL_1.key),
+            source=ClassificationSource.MODEL_1,
+            predicted_class=best_class,
+            probabilities=prob_dict,
+            calibrated_confidence=round(confidence, 4),
+            calibration_status=CalibrationStatus.CALIBRATED,
+            decision=ClassificationDecision.ACCEPTED,
+            reason="MODEL_1_ACCEPTED",
+            inference_ms=elapsed_ms,
+        )
+
     def classify_flow(
-        self, window: FlowFeatureWindow, mode: ExperimentMode
+        self,
+        window: FlowFeatureWindow,
+        mode: ExperimentMode,
+        packet_record: PacketLevelRecord | None = None,
     ) -> ClassificationResult:
         """Classify one feature window.
 
@@ -152,10 +228,25 @@ class TrafficClassifier:
                     reason="MODEL_NOT_READY",
                     inference_ms=None,
                 )
-            raise NotImplementedError(
-                "Model 1 inference is not implemented. The registry must not "
-                "report READY until it is."
-            )
+            if packet_record is None:
+                # Model 1 needs per-packet positional features (first-8
+                # sizes and 7 gaps) that windowed aggregates do not carry.
+                # SIMULATION mode has no packet capture, so this path is
+                # expected there. LIVE mode will supply a PacketLevelRecord
+                # once the capture pipeline is wired in.
+                return ClassificationResult(
+                    flow_id=window.flow_id,
+                    model_version=self._registry.version(MODEL_1.key),
+                    source=ClassificationSource.SAFE_FALLBACK,
+                    predicted_class=TrafficClass.UNKNOWN,
+                    probabilities={},
+                    calibrated_confidence=None,
+                    calibration_status=CalibrationStatus.UNAVAILABLE,
+                    decision=ClassificationDecision.SAFE_FALLBACK,
+                    reason="NO_PACKET_RECORD",
+                    inference_ms=None,
+                )
+            return self._classify_with_model1(window, packet_record)
 
         traffic_class, rule = classify_with_rules(window)
         elapsed_ms = (time.perf_counter() - started) * 1000.0

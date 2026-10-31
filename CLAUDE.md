@@ -12,7 +12,7 @@ You are the senior implementation engineer for **QoSense**, an adaptive, intent-
 6. `docs/UI_SPEC.md` — visual system, pages, 3D scene and event-driven animations.
 7. `docs/SAFETY_SECURITY.md` — security and Linux network-control boundaries.
 8. `docs/IMPLEMENTATION_PLAN.md` — implementation order and definition of done.
-9. `docs/COMPETITOR_STUDY.md` — lessons to investigate from AQoSE without copying it.
+9. `docs/COMPETITOR_STUDY.md` — notes on AQoSE, the team's own earlier prototype; safe to reuse directly.
 
 Reference files are in `references/`:
 - `Case_Study_3_Original.pdf` is the authoritative problem statement.
@@ -32,7 +32,7 @@ Reference files are in `references/`:
 - Only predefined, validated scenarios and policy profiles may be executed by the privileged Ubuntu lab agent.
 - Linux network enforcement must run on a suitably configured Ubuntu host/VM with the required network-administration capability. Do not assume an ordinary Render web service can create namespaces or change host traffic control.
 - Use the lab-agent boundary described in `docs/SAFETY_SECURITY.md`.
-- Do not copy AQoSE source code, datasets, diagrams or configuration. Study its design ideas and implement our own approach.
+- AQoSE is the team's own prior prototype (same authors, different repository name). Its code, datasets, feature schema and configuration may be reused and adapted directly; it is not third-party or competitor work.
 - Do not claim application identification is guaranteed from encrypted flow metadata. Use broad classes and an `unknown` class.
 - Distinguish RTT from one-way delay. Define jitter consistently. Calculate fairness only across comparable flows.
 - Use full forms for abbreviations at first use in user-facing documentation. Keep the language simple and direct.

@@ -1,26 +1,48 @@
 """Machine-learning model registry.
 
-Both QoSense models are Light Gradient Boosting Machine (LightGBM) artifacts
-that are trained in a separate phase. This registry reports what is *actually*
-loaded. It never reports ``READY`` for a model it cannot run, and it never
-produces a probability when no artifact exists.
+Both QoSense models are Light Gradient Boosting Machine (LightGBM) artifacts.
+This registry reports what is *actually* loaded. It never reports ``READY``
+for a model it cannot run, and it never produces a probability when no
+artifact exists.
 
 Phase status at the time of writing:
 
-* Model 1 (traffic classifier)  - designed, not trained. Phase 4 / Round 1.
+* Model 1 (traffic classifier)  - trained artifact loaded. Reused from
+  AQoSE, the team's own earlier prototype (see
+  ``docs/COMPETITOR_STUDY.md``), with a documented feature-vector and
+  class-taxonomy adaptation in ``app.models.aqose_features``. Phase 4 /
+  Round 1.
 * Model 2 (congestion predictor) - designed, not trained. Phase 5 / Round 2.
 """
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 from dataclasses import dataclass
+from typing import Any
 
 from app.config import Settings
 from app.domain.enums import ModelState
 from app.domain.metrics import FEATURE_SCHEMA_VERSION, StrictModel
 
+logger = logging.getLogger("qosense.models.registry")
+
 NOT_TRAINED_VERSION = "not-trained"
+
+
+@dataclass
+class LoadedTrafficClassifier:
+    """An actually-loaded Model 1 artifact: the estimator plus its metadata.
+
+    ``feature_names`` is checked against ``aqose_features.FEATURE_NAMES`` at
+    load time, the same guard AQoSE's own ``model.load`` makes: a model
+    trained on a different feature list would silently misread every row.
+    """
+
+    estimator: Any
+    meta: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -108,13 +130,65 @@ class ModelRegistry:
             if not os.path.isfile(path):
                 self._load_errors[key] = f"Configured artifact not found at '{path}'."
                 continue
-            # Loading is deliberately not implemented until the training
-            # pipeline for that phase exists. Reporting FAILED here is honest:
-            # a path was configured but nothing can run.
-            self._load_errors[key] = (
-                "Artifact loading is not implemented in this build. "
-                "Train and integrate the model in its phase before enabling it."
+            if key == MODEL_1.key:
+                self._attempt_load_traffic_classifier(path)
+            else:
+                # Model 2's training pipeline does not exist yet (Phase 5,
+                # Round 2). A path being configured without a pipeline behind
+                # it is reported as failed, not silently ignored.
+                self._load_errors[key] = (
+                    "Model 2 training is not implemented. Scheduled for Phase 5, Round 2."
+                )
+
+    def _attempt_load_traffic_classifier(self, path: str) -> None:
+        from app.models import aqose_features
+
+        try:
+            import joblib
+        except ImportError as exc:  # pragma: no cover - dependency missing
+            self._load_errors[MODEL_1.key] = f"joblib is not installed: {exc}"
+            return
+
+        meta_path = os.path.join(os.path.dirname(path), "meta.json")
+        if not os.path.isfile(meta_path):
+            self._load_errors[MODEL_1.key] = f"Artifact metadata not found at '{meta_path}'."
+            return
+
+        try:
+            with open(meta_path, encoding="utf-8") as handle:
+                meta = json.load(handle)
+        except (OSError, json.JSONDecodeError) as exc:
+            self._load_errors[MODEL_1.key] = f"Could not read artifact metadata: {exc}"
+            return
+
+        # Refuse a model trained on a different feature list. Its numbers
+        # would mean something else; loading it anyway would be a silent
+        # correctness bug, not a working model.
+        if meta.get("features") != aqose_features.FEATURE_NAMES:
+            self._load_errors[MODEL_1.key] = (
+                "Artifact was trained on a different feature list than "
+                "app.models.aqose_features.FEATURE_NAMES expects; refusing to load it."
             )
+            return
+
+        try:
+            estimator = joblib.load(path)
+        except Exception as exc:  # noqa: BLE001 - any load failure is reported, not raised
+            self._load_errors[MODEL_1.key] = f"Could not load artifact: {exc}"
+            return
+
+        if not hasattr(estimator, "predict_proba") or not hasattr(estimator, "classes_"):
+            self._load_errors[MODEL_1.key] = (
+                "Loaded object has no predict_proba/classes_; not a usable classifier."
+            )
+            return
+
+        self._loaded[MODEL_1.key] = LoadedTrafficClassifier(estimator=estimator, meta=meta)
+        logger.info(
+            "Model 1 traffic classifier loaded: version=%s classes=%s",
+            meta.get("model_version"),
+            list(estimator.classes_),
+        )
 
     def state(self, key: str) -> ModelState:
         if key in self._loaded:
@@ -129,7 +203,21 @@ class ModelRegistry:
         return self.state(key) is ModelState.READY
 
     def version(self, key: str) -> str:
-        return NOT_TRAINED_VERSION if not self.is_ready(key) else "unknown"
+        if not self.is_ready(key):
+            return NOT_TRAINED_VERSION
+        loaded = self._loaded.get(key)
+        if isinstance(loaded, LoadedTrafficClassifier):
+            return str(loaded.meta.get("model_version", "unknown"))
+        return "unknown"
+
+    def traffic_classifier(self) -> LoadedTrafficClassifier | None:
+        """The loaded Model 1 artifact, or ``None`` if it is not ready.
+
+        Kept separate from the generic ``_loaded`` dict so callers get a
+        typed object rather than reaching into registry internals.
+        """
+        loaded = self._loaded.get(MODEL_1.key)
+        return loaded if isinstance(loaded, LoadedTrafficClassifier) else None
 
     def record_inference(self, key: str, timestamp: str) -> None:
         self._inference_counts[key] = self._inference_counts.get(key, 0) + 1
@@ -137,6 +225,14 @@ class ModelRegistry:
 
     def status(self, slot: ModelSlot) -> ModelStatus:
         state = self.state(slot.key)
+        ready_detail = (
+            "Artifact loaded and able to run inference. Reused from AQoSE (the team's own "
+            "earlier prototype) with a documented feature-vector and class-taxonomy "
+            "adaptation; see app.models.aqose_features. Only runs on LIVE packet captures; "
+            "SIMULATION has no per-packet data to feed it."
+            if slot.key == MODEL_1.key
+            else "Artifact loaded and able to run inference."
+        )
         detail = {
             ModelState.NOT_CONFIGURED: (
                 f"No artifact configured. Designed in docs/ML_SPEC.md and scheduled for "
@@ -144,11 +240,12 @@ class ModelRegistry:
                 f"This model is not producing any prediction."
             ),
             ModelState.FAILED: self._load_errors.get(slot.key, "Artifact could not be loaded."),
-            ModelState.READY: "Artifact loaded and able to run inference.",
+            ModelState.READY: ready_detail,
             ModelState.TRAINING: "Training in progress.",
             ModelState.DISABLED: "Disabled by configuration.",
         }[state]
 
+        traffic_classifier_ready = slot.key == MODEL_1.key and state is ModelState.READY
         return ModelStatus(
             key=slot.key,
             model_name=slot.model_name,
@@ -159,8 +256,15 @@ class ModelRegistry:
             state=state,
             version=self.version(slot.key),
             artifact_path=self._paths.get(slot.key) or None,
-            feature_schema_version=FEATURE_SCHEMA_VERSION if slot.key == MODEL_1.key else None,
-            calibration_available=False,
+            feature_schema_version=(
+                "aqose-packet-features-v1"
+                if traffic_classifier_ready
+                else (FEATURE_SCHEMA_VERSION if slot.key == MODEL_1.key else None)
+            ),
+            # Calibration is baked into the saved estimator (temperature
+            # scaling, chosen during AQoSE's own training); predict_proba
+            # already reflects it, so this is true once the artifact loads.
+            calibration_available=traffic_classifier_ready,
             last_inference_at=self._last_inference.get(slot.key),
             inference_count=self._inference_counts.get(slot.key, 0),
             implementation_phase=slot.implementation_phase,

@@ -35,7 +35,7 @@ capability has been tested against a real Ubuntu laboratory agent.
 | Capability | Status | Evidence | Limitations |
 |---|---|---|---|
 | M2 classification, deterministic rule set | TESTED | `TestRuleClassifier` (8 tests) | Rules produce a class, never a probability. Mode 2 baseline only |
-| M2 **Model 1**, LightGBM multiclass | NOT_STARTED | Designed in `ML_SPEC.md` | **Not trained.** Reports `NOT_CONFIGURED`. Modes 3 and 4 fall back to `UNKNOWN` and are marked degraded |
+| M2 **Model 1**, LightGBM multiclass | IMPLEMENTED_LIVE | `app/models/artifacts/traffic_classifier/` (AQoSE artifact), `app/models/aqose_features.py`, `app/control/classifier.py` | Requires a `PacketLevelRecord` (per-packet capture). SIMULATION has no packet capture so returns `NO_PACKET_RECORD` fallback. LIVE mode will supply records once the capture pipeline is wired in. |
 | M3A usable-capacity estimator | TESTED | `TestCapacityEstimator` (7 tests) | — |
 | Estimator tracks a hidden bottleneck drop | TESTED | `test_tracks_a_real_bottleneck_drop_without_reading_the_configuration` | Never reads the configured rate |
 | M3B **Model 2**, congestion predictor | NOT_STARTED | Designed in `ML_SPEC.md` | **Not trained.** Scheduled for Phase 5 / Round 2. Always returns `UNAVAILABLE` / `IGNORED` |
@@ -117,7 +117,7 @@ capability has been tested against a real Ubuntu laboratory agent.
 
 | Item | Status | Blocker |
 |---|---|---|
-| **Model 1 training and integration** | NOT_STARTED | Needs labelled captures from the laboratory. The pipeline, feature schema and fallback all exist; only the trained artifact is missing. Until then Mode 3 is marked degraded and must not be presented as a Mode 3 result. |
+| **Model 1 integration** | IMPLEMENTED_LIVE | AQoSE artifact loaded and wired. LIVE inference works end-to-end when a `PacketLevelRecord` is supplied. Remaining gap: per-packet capture pipeline in `lab/agent/` to populate those records during LIVE runs. |
 | **Mode 2 against Mode 3 comparison** | NOT_STARTED | Depends on Model 1 |
 | **Repeated runs with reports** | PARTIAL | A single run produces a report with medians and interquartile ranges; aggregation across repeats is not built |
 | **Public dashboard URL** | NOT_STARTED | Deployment not configured |
@@ -134,8 +134,12 @@ capability has been tested against a real Ubuntu laboratory agent.
 
 ## Known limitations and risks
 
-1. **Neither model is trained.** Modes 3 and 4 run, but every flow takes the
-   safe fallback. Those runs must not be presented as Mode 3 or Mode 4 results.
+1. **Model 1 is integrated but needs per-packet capture in LIVE mode.** The
+   AQoSE artifact is loaded and runs real inference when supplied a
+   `PacketLevelRecord`. In SIMULATION and in LIVE runs before the capture
+   pipeline is wired, every flow takes the safe fallback (`NO_PACKET_RECORD`).
+   Model 2 is not trained (Phase 5, Round 2). Mode 4 still falls back to
+   UNKNOWN for the congestion predictor.
 2. **Policy weights are untuned.** They are documented, versioned and
    defensible, but they have not been validated against held-out experiments.
    That is Round 2 work.

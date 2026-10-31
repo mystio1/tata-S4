@@ -6,9 +6,17 @@ Bounds here are enforced server-side. A client cannot widen them.
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# The checked-in traffic classifier artifact (see docs/COMPETITOR_STUDY.md:
+# AQoSE is this team's own earlier prototype, reused here with a documented
+# feature-vector and class-taxonomy adaptation).
+_DEFAULT_TRAFFIC_CLASSIFIER_PATH = str(
+    Path(__file__).resolve().parent / "models" / "artifacts" / "traffic_classifier" / "model.joblib"
+)
 
 
 class Settings(BaseSettings):
@@ -59,7 +67,7 @@ class Settings(BaseSettings):
     verification_window_seconds: float = Field(default=4.0, gt=0)
 
     # Model artifacts. Empty means the model is NOT_CONFIGURED.
-    traffic_classifier_path: str = ""
+    traffic_classifier_path: str = Field(default_factory=lambda: _DEFAULT_TRAFFIC_CLASSIFIER_PATH)
     congestion_predictor_path: str = ""
 
     @property

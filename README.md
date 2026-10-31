@@ -13,9 +13,13 @@ process. `LIVE` runs the same controller against an isolated Linux testbed of
 network namespaces, applying **real traffic control** and confirming every
 change by reading the kernel's own state back.
 
-**What it is not yet.** Neither machine-learning model is trained, so Modes 3
-and 4 fall back to a safe `UNKNOWN` class and are marked degraded. Nothing in
-the interface claims otherwise. See [Honest status](#honest-status).
+**Model 1 status.** The AQoSE LightGBM artifact (the team's own prior
+prototype) is loaded and runs real inference. It needs per-packet positional
+features that the current lab capture pipeline does not yet produce, so
+SIMULATION mode and LIVE runs without packet capture both take a safe
+`NO_PACKET_RECORD` fallback. Once the capture pipeline is wired in, Mode 3
+will produce real model predictions. Model 2 is not trained (Phase 5,
+Round 2). See [Honest status](#honest-status).
 
 ---
 
@@ -166,7 +170,7 @@ anyone.
 | Deterministic simulator | Implemented and tested | `backend/tests/test_simulation_engine.py` |
 | M1 flow observer and feature windows | Implemented (simulation) | `app/control/observer.py` |
 | M2 classification, deterministic rules | Implemented and tested | `tests/test_control_plane.py::TestRuleClassifier` |
-| M2 classification, **Model 1** | **Not trained.** Designed only | `docs/ML_SPEC.md`, Phase 4 |
+| M2 classification, **Model 1** | **Integrated, needs packet capture** | AQoSE artifact loaded; real inference runs when a `PacketLevelRecord` is available; SIMULATION uses safe fallback |
 | M3A usable-capacity estimator | Implemented and tested | `tests/test_control_plane.py::TestCapacityEstimator` |
 | M3B **Model 2** congestion predictor | **Not trained.** Designed only | `docs/ML_SPEC.md`, Phase 5, Round 2 |
 | M4 policy engine with scored candidates | Implemented and tested | `tests/test_control_plane.py::TestPolicyEngine` |

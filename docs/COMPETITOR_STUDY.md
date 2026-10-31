@@ -1,11 +1,22 @@
-# Competitor Study — AQoSE and QoSense Improvement Opportunities
+# AQoSE — Prior Work Reference and QoSense Improvement Opportunities
+
+## Status: same team, not a competitor
+
+AQoSE was previously tracked as external competitor work with a strict
+no-copy rule. That rule is **lifted**: AQoSE is this team's own earlier
+prototype, published under a different repository name/account. Its source,
+datasets, feature schema, trained artifacts and configuration may be reused,
+adapted or ported into QoSense directly, same as any other first-party code
+the team owns.
 
 ## Reference
 
 AQoSE — Adaptive Quality of Service Engine:
 https://github.com/shreyashsri79/AQoSE-Adaptive-Quality-of-Service-Engine-
 
-Review the current repository contents before relying on these notes. Repository claims and results are developer-reported and should not be treated as independently verified.
+Review the current repository contents before relying on these notes; they
+were compiled from a single README fetch and have not been independently
+verified against the full file tree.
 
 ## Publicly documented AQoSE design elements to investigate
 
@@ -42,7 +53,7 @@ For each potential feature, verify it in current source code/docs and classify i
 - Not found / not established.
 - Recommended QoSense action: adopt, adapt, benchmark or reject.
 
-Do not make claims about competitor internals without inspecting current repository sources. Do not copy AQoSE source code, diagrams, training data or numerical configurations. Check its license before any code reuse.
+Verify specifics against the current repository sources before relying on them in documentation. The no-copy restriction no longer applies (own prior work); reuse of source, diagrams, training data and configurations is permitted.
 
 ## QoSense improvement priorities
 

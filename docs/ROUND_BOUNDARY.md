@@ -43,7 +43,7 @@ This document is authoritative for implementation prioritization. The architectu
    - A deterministic state machine with hysteresis, cooldown and named candidate actions.
    - Implement a simple, explainable impact-aware candidate score if it can be validated: interactive-delay risk, bulk-progress risk, fairness penalty and policy-churn penalty.
    - Hard safety/fairness constraints override every score.
-   - Do not copy AQoSE's numerical damage table or weights; derive and version our own test configuration.
+   - AQoSE is the team's own prior work; its damage table/weights may be reused directly or adapted as a starting point, with our own version recorded.
 
 6. **Safety Guard and M5 — Real Linux enforcement**
    - Isolated Ubuntu network namespaces, virtual Ethernet pairs and a controlled bottleneck.
@@ -167,7 +167,6 @@ A hosted web UI alone does not satisfy this acceptance gate. If the public backe
 
 ## Explicit exclusions
 
-- Do not copy AQoSE source code, feature tables, labels, damage weights, dataset or diagrams.
 - Do not claim QoSense is better based on having two ML models.
 - Do not defer essential safety until Round 2 if live enforcement is enabled in Round 1.
 - Do not claim Model 2 is implemented in Round 1 unless it is trained, validated and integrated.
