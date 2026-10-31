@@ -2,6 +2,8 @@
 
 An adaptive, intent-aware home Quality of Service (QoS) engine.
 
+**Problem statement:** Case Study 3.
+
 QoSense observes network flow behaviour without reading application content,
 estimates how much of the link is usable, selects a bounded and fair policy,
 applies it, and then measures whether the result actually improved anything.

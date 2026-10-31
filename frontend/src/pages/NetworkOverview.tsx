@@ -114,7 +114,7 @@ export function NetworkOverview() {
           />
         </Panel>
 
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--gap-md)' }}>
+        <div className="overview-grid__side">
           <NetworkHealthPanel snapshot={snapshot} />
           <Panel title="Live throughput" hint="Measured delivered rate">
             <ThroughputChart series={series} height={132} />
@@ -122,7 +122,7 @@ export function NetworkOverview() {
           <Panel title="Latency and jitter" hint="Probe measurements">
             <DelayJitterChart series={series} targetMs={30} height={132} />
           </Panel>
-          <Panel title="Recent events" flush style={{ maxHeight: 230 }}>
+          <Panel title="Recent events" flush style={{ height: 230, flex: 'none' }}>
             <EventTimeline events={events} limit={40} />
           </Panel>
         </div>

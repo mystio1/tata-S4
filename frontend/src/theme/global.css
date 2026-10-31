@@ -228,8 +228,9 @@ a {
 .stat-tile__label {
   font-size: 10px;
   text-transform: uppercase;
-  letter-spacing: 0.07em;
-  color: var(--text-faint);
+  letter-spacing: 0.08em;
+  color: var(--bronze);
+  font-weight: 600;
   display: flex;
   align-items: center;
   gap: 5px;
@@ -243,6 +244,7 @@ a {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  color: var(--champagne);
 }
 
 .stat-tile__unit {
@@ -253,7 +255,7 @@ a {
 
 .stat-tile__note {
   font-size: 10px;
-  color: var(--text-faint);
+  color: var(--text-muted);
 }
 
 /* ----------------------------------------------------------------- panel */
@@ -265,6 +267,10 @@ a {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
 }
 
 .panel__head {
@@ -387,20 +393,45 @@ a {
 
 .overview-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 330px;
+  grid-template-columns: minmax(0, 1fr) 380px;
   gap: var(--gap-md);
-  min-height: 460px;
+  height: 640px;
+  align-items: stretch;
+}
+
+.overview-grid > * {
+  min-height: 0;
+  min-width: 0;
+}
+
+.overview-grid__side {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-md);
+  min-height: 0;
+  height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 2px;
 }
 
 .pipeline-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(265px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(290px, 1fr));
   gap: var(--gap-md);
+  position: relative;
+  z-index: 1;
 }
 
 @media (max-width: 1180px) {
   .overview-grid {
     grid-template-columns: 1fr;
+    height: auto;
+  }
+
+  .overview-grid__side {
+    height: auto;
+    overflow: visible;
   }
 }
 
@@ -551,8 +582,9 @@ input:disabled {
 }
 
 .kv dt {
-  color: var(--text-faint);
+  color: var(--text-muted);
   white-space: nowrap;
+  font-weight: 500;
 }
 
 .kv dd {
@@ -562,6 +594,7 @@ input:disabled {
   text-align: right;
   overflow: hidden;
   text-overflow: ellipsis;
+  color: var(--champagne);
 }
 
 .legend {
@@ -590,7 +623,7 @@ input:disabled {
 }
 
 .faint {
-  color: var(--text-faint);
+  color: var(--text-muted);
 }
 
 .mono {
@@ -619,8 +652,9 @@ input:disabled {
   border-radius: var(--radius-sm);
   padding: var(--gap-sm) var(--gap);
   font-size: var(--text-sm);
-  color: var(--text-muted);
+  color: var(--champagne);
   background: var(--surface-sunken);
+  line-height: 1.55;
 }
 
 .notice--warning {
@@ -670,9 +704,10 @@ input:disabled {
 .scene-shell {
   position: relative;
   flex: 1;
-  min-height: 420px;
+  min-height: 0;
   border-radius: var(--radius);
   overflow: hidden;
+  isolation: isolate;
   background: radial-gradient(
     110% 85% at 50% 18%,
     #11312f 0%,
@@ -773,18 +808,21 @@ input:disabled {
 .check-list {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 4px;
   margin: 0;
   padding: 0;
   list-style: none;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .check {
   display: grid;
-  grid-template-columns: 14px 1fr;
-  gap: var(--gap-sm);
+  grid-template-columns: 16px 1fr;
+  gap: 6px var(--gap-sm);
   align-items: start;
   font-size: var(--text-sm);
+  min-width: 0;
 }
 
 .check__mark {
@@ -793,12 +831,14 @@ input:disabled {
 }
 
 .check__name {
-  color: var(--text);
+  color: var(--champagne);
+  font-weight: 500;
 }
 
 .check__detail {
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: var(--text-xs);
+  line-height: 1.5;
 }
 
 .candidate {
@@ -836,7 +876,7 @@ input:disabled {
   flex-wrap: wrap;
   gap: var(--gap-sm);
   font-size: 10px;
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-family: var(--font-mono);
 }
 
